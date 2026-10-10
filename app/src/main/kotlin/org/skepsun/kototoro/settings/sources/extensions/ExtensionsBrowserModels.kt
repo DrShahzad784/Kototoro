@@ -77,6 +77,7 @@ internal fun buildExtensionsBrowserItems(
     collapsedLanguageGroups: Set<ExtensionsLanguageGroupKey>,
     query: String,
     isTrustedPackage: (packageName: String, expectedFingerprint: String) -> Boolean,
+    isStrictLanguageFilter: Boolean = false,
 ): List<ExtensionsBrowserListItem> {
     val installedMap = installed.associateBy { type.normalizePackageNameForMatching(it.pkgName) }
     val updates = mutableListOf<ExtensionsBrowserListItem.Entry>()
@@ -204,15 +205,15 @@ internal fun buildExtensionsBrowserItems(
         selectedExtensionLanguages.mapTo(LinkedHashSet()) { it.normalizeExtensionLanguageCode() }
     }
     val filteredUpdates = updates.filterByQuery(query)
-        .filterByLanguage(allowedLanguages)
+        .filterByLanguage(allowedLanguages, isStrictLanguageFilter)
     val filteredUntrusted = untrusted.filterByQuery(query)
-        .filterByLanguage(allowedLanguages)
+        .filterByLanguage(allowedLanguages, isStrictLanguageFilter)
     val filteredIncompatible = incompatible.filterByQuery(query)
-        .filterByLanguage(allowedLanguages)
+        .filterByLanguage(allowedLanguages, isStrictLanguageFilter)
     val filteredInstalled = installedOnly.filterByQuery(query)
-        .filterByLanguage(allowedLanguages)
+        .filterByLanguage(allowedLanguages, isStrictLanguageFilter)
     val filteredAvailable = availableOnly.filterByQuery(query)
-        .filterByLanguage(allowedLanguages)
+        .filterByLanguage(allowedLanguages, isStrictLanguageFilter)
 
     return buildList {
         addSection(ExtensionsBrowserSection.UPDATES, filteredUpdates, collapsedLanguageGroups, selectedExtensionLanguages)
@@ -234,9 +235,18 @@ private fun List<ExtensionsBrowserListItem.Entry>.filterByQuery(query: String): 
     }
 }
 
-private fun List<ExtensionsBrowserListItem.Entry>.filterByLanguage(allowedLanguages: Set<String>?): List<ExtensionsBrowserListItem.Entry> {
+private fun List<ExtensionsBrowserListItem.Entry>.filterByLanguage(
+    allowedLanguages: Set<String>?,
+    isStrict: Boolean = false,
+): List<ExtensionsBrowserListItem.Entry> {
     if (allowedLanguages == null) return this
-    return filter { it.language.isBlank() || it.language in allowedLanguages }
+    return filter {
+        if (isStrict) {
+            it.language.isNotBlank() && it.language in allowedLanguages
+        } else {
+            it.language.isBlank() || it.language in allowedLanguages
+        }
+    }
 }
 
 internal fun String.normalizeExtensionLanguageCode(): String {

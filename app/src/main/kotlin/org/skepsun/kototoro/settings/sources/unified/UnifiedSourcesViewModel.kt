@@ -195,6 +195,7 @@ class UnifiedSourcesViewModel @Inject constructor(
     private val filterState = MutableStateFlow(
         UnifiedSourcesFilterState(
             languages = settings.extensionLanguages.normalizeLanguageCodes(),
+            isStrictLanguageFilter = settings.isStrictExtensionLanguageFilter,
         ),
     )
     /**
@@ -408,6 +409,15 @@ class UnifiedSourcesViewModel @Inject constructor(
         }
     }
 
+    fun setStrictLanguageFilter(isStrict: Boolean) {
+        settings.isStrictExtensionLanguageFilter = isStrict
+        filterState.update { it.copy(isStrictLanguageFilter = isStrict) }
+    }
+
+    fun toggleStrictLanguageFilter() {
+        setStrictLanguageFilter(!filterState.value.isStrictLanguageFilter)
+    }
+
     fun setPackageStatusFilter(filter: UnifiedPackageStatusFilter) {
         filterState.update { it.copy(packageStatusFilter = filter) }
     }
@@ -416,6 +426,7 @@ class UnifiedSourcesViewModel @Inject constructor(
         filterState.value = UnifiedSourcesFilterState(
             availabilityFilter = UnifiedAvailabilityFilter.AVAILABLE,
             packageStatusFilter = UnifiedPackageStatusFilter.ALL,
+            isStrictLanguageFilter = settings.isStrictExtensionLanguageFilter,
         )
     }
 
@@ -2093,7 +2104,7 @@ class UnifiedSourcesViewModel @Inject constructor(
             .filter { filters.kinds.isEmpty() || it.kind in filters.kinds }
             .filter { it.matchesRepositoryFilter(filters.repositoryId) }
             .filter { filters.locationTypes.isEmpty() || it.repositoryLocationType(repositoriesById) in filters.locationTypes }
-            .filter { filters.languages.isEmpty() || it.language.matchesLanguageFilter(filters.languages) }
+            .filter { filters.languages.isEmpty() || it.language.matchesLanguageFilter(filters.languages, filters.isStrictLanguageFilter) }
             .filter {
                 when (filters.packageStatusFilter) {
                     UnifiedPackageStatusFilter.ALL -> true
@@ -2124,7 +2135,7 @@ class UnifiedSourcesViewModel @Inject constructor(
             .filter { filters.kinds.isEmpty() || it.kind in filters.kinds }
             .filter { filters.contentTypes.isEmpty() || it.contentType in filters.contentTypes }
             .filter { it.matchesRepositoryFilter(filters.repositoryId, packagesById) }
-            .filter { filters.languages.isEmpty() || it.language.matchesLanguageFilter(filters.languages) }
+            .filter { filters.languages.isEmpty() || it.language.matchesLanguageFilter(filters.languages, filters.isStrictLanguageFilter) }
             .filter {
                 when (filters.enabledFilter) {
                     UnifiedEnabledFilter.ALL -> true
@@ -2198,9 +2209,13 @@ private fun UnifiedSourceItem.repositoryLocationType(
     return effectiveRepositoryId(packagesById)?.let(repositoriesById::get)?.locationType
 }
 
-private fun String?.matchesLanguageFilter(languages: Set<String>): Boolean {
+internal fun String?.matchesLanguageFilter(languages: Set<String>, isStrict: Boolean = false): Boolean {
     val normalized = this?.normalizeLanguageCode().orEmpty()
-    return normalized.isBlank() || normalized in languages
+    return if (isStrict) {
+        normalized.isNotBlank() && normalized in languages
+    } else {
+        normalized.isBlank() || normalized in languages
+    }
 }
 
 private fun Iterable<String>.normalizeLanguageCodes(): LinkedHashSet<String> {

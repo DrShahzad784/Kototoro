@@ -375,6 +375,7 @@ fun UnifiedSourcesRoute(
             },
             onLanguageClick = viewModel::toggleLanguage,
             onApplyPreferredLanguages = viewModel::applyPreferredLanguages,
+            onStrictLanguageFilterChange = viewModel::setStrictLanguageFilter,
             onEnabledFilterChange = viewModel::setEnabledFilter,
             onAvailabilityFilterChange = viewModel::setAvailabilityFilter,
             onTestAvailabilityFilterChange = viewModel::setTestAvailabilityFilter,

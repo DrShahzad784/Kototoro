@@ -34,6 +34,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.LaunchedEffect
@@ -485,6 +486,8 @@ internal fun UnifiedPackageStateDetailsDialog(
 internal fun UnifiedLanguageFilterDialog(
     languages: List<String>,
     selectedLanguages: Set<String>,
+    isStrictLanguageFilter: Boolean = false,
+    onStrictLanguageFilterChange: (Boolean) -> Unit = {},
     onDismiss: () -> Unit,
     onLanguageClick: (String) -> Unit,
     onApplyPreferredLanguages: () -> Unit,
@@ -519,19 +522,52 @@ internal fun UnifiedLanguageFilterDialog(
             }
         },
         text = {
-            LazyVerticalGrid(
-                columns = GridCells.Adaptive(minSize = 120.dp),
-                modifier = Modifier.heightIn(max = 360.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            Column(
+                modifier = Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                gridItems(languages, key = { it }) { language ->
-                    CompactFilterChip(
-                        selected = language in selectedLanguages,
-                        onClick = { onLanguageClick(language) },
-                        text = language.displayLanguageLabel(),
-                        modifier = Modifier.fillMaxWidth(),
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { onStrictLanguageFilterChange(!isStrictLanguageFilter) }
+                        .padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = stringResource(R.string.strict_language_filter),
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                        Text(
+                            text = stringResource(R.string.strict_language_filter_summary),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = isStrictLanguageFilter,
+                        onCheckedChange = onStrictLanguageFilterChange,
                     )
+                }
+
+                LazyVerticalGrid(
+                    columns = GridCells.Adaptive(minSize = 120.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 320.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    gridItems(languages, key = { it }) { language ->
+                        CompactFilterChip(
+                            selected = language in selectedLanguages,
+                            onClick = { onLanguageClick(language) },
+                            text = language.displayLanguageLabel(),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
                 }
             }
         },
@@ -545,6 +581,7 @@ internal fun UnifiedCombinedFilterDialog(
     onClearAll: () -> Unit,
     onLanguageClick: (String) -> Unit,
     onApplyPreferredLanguages: () -> Unit,
+    onStrictLanguageFilterChange: (Boolean) -> Unit,
     onEnabledFilterChange: (UnifiedEnabledFilter) -> Unit,
     onAvailabilityFilterChange: (UnifiedAvailabilityFilter) -> Unit,
     onTestAvailabilityFilterChange: (UnifiedTestAvailabilityFilter) -> Unit,
@@ -780,6 +817,31 @@ internal fun UnifiedCombinedFilterDialog(
                             .heightIn(max = 380.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable { onStrictLanguageFilterChange(!readyState.filters.isStrictLanguageFilter) }
+                                .padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = stringResource(R.string.strict_language_filter),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                )
+                                Text(
+                                    text = stringResource(R.string.strict_language_filter_summary),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            Switch(
+                                checked = readyState.filters.isStrictLanguageFilter,
+                                onCheckedChange = onStrictLanguageFilterChange,
+                            )
+                        }
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.End,

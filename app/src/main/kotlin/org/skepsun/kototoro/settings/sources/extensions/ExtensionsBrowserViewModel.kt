@@ -63,6 +63,11 @@ class ExtensionsBrowserViewModel @Inject constructor(
     ) { extensionLanguages }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), settings.extensionLanguages)
 
+    private val isStrictExtensionLanguageFilter: StateFlow<Boolean> = settings.observeAsFlow(
+        AppSettings.KEY_STRICT_EXTENSION_LANGUAGE_FILTER,
+    ) { isStrictExtensionLanguageFilter }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), settings.isStrictExtensionLanguageFilter)
+
     val repoCount: StateFlow<Int> = repoRepository.observeByType(type)
         .map { it.size }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
@@ -80,12 +85,14 @@ class ExtensionsBrowserViewModel @Inject constructor(
         availableExtensions,
         installService.downloadStates,
         selectedExtensionLanguages,
-    ) { installed, available, downloads, selectedLanguages ->
+        isStrictExtensionLanguageFilter,
+    ) { installed, available, downloads, selectedLanguages, isStrict ->
         BrowserInputs(
             installed = installed,
             available = available,
             downloads = downloads,
             selectedLanguages = selectedLanguages,
+            isStrictLanguageFilter = isStrict,
             collapsedGroups = emptySet(),
         )
     }.stateIn(
@@ -96,6 +103,7 @@ class ExtensionsBrowserViewModel @Inject constructor(
             available = emptyList(),
             downloads = emptyMap(),
             selectedLanguages = selectedExtensionLanguages.value,
+            isStrictLanguageFilter = isStrictExtensionLanguageFilter.value,
             collapsedGroups = emptySet(),
         ),
     )
@@ -124,6 +132,7 @@ class ExtensionsBrowserViewModel @Inject constructor(
             collapsedLanguageGroups = inputs.collapsedGroups,
             query = query,
             isTrustedPackage = signatureValidator::isTrusted,
+            isStrictLanguageFilter = inputs.isStrictLanguageFilter,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -387,6 +396,7 @@ class ExtensionsBrowserViewModel @Inject constructor(
             collapsedLanguageGroups = browserInputs.value.collapsedGroups,
             query = "",
             isTrustedPackage = signatureValidator::isTrusted,
+            isStrictLanguageFilter = browserInputs.value.isStrictLanguageFilter,
         ).filterIsInstance<ExtensionsBrowserListItem.Entry>()
             .filter { it.state == ExtensionsBrowserEntryState.UPDATE_AVAILABLE }
     }
@@ -396,6 +406,7 @@ class ExtensionsBrowserViewModel @Inject constructor(
         val available: List<RepoAvailableExtension>,
         val downloads: Map<String, org.skepsun.kototoro.extensions.install.ExtensionInstallDownloadState>,
         val selectedLanguages: Set<String>,
+        val isStrictLanguageFilter: Boolean,
         val collapsedGroups: Set<ExtensionsLanguageGroupKey>,
     )
 }

@@ -915,6 +915,10 @@ class AppSettings @Inject constructor(@ApplicationContext private val context: C
         get() = prefs.getStringSet(KEY_EXTENSION_LANGUAGES, null) ?: emptySet()
         set(value) = prefs.edit { putStringSet(KEY_EXTENSION_LANGUAGES, value) }
 
+    var isStrictExtensionLanguageFilter: Boolean
+        get() = prefs.getBoolean(KEY_STRICT_EXTENSION_LANGUAGE_FILTER, false)
+        set(value) = prefs.edit { putBoolean(KEY_STRICT_EXTENSION_LANGUAGE_FILTER, value) }
+
     var extensionInstallPolicies: Map<String, ExtensionInstallPolicy>
         get() = decodeExtensionInstallPolicies(prefs.getStringSet(KEY_EXTENSION_INSTALL_POLICIES, null))
         set(value) = prefs.edit {
@@ -3234,6 +3238,7 @@ class AppSettings @Inject constructor(@ApplicationContext private val context: C
         const val KEY_APP_LOCALE = "app_locale"
         const val KEY_CONTENT_LANGUAGES = "content_languages"
         const val KEY_EXTENSION_LANGUAGES = "extension_languages"
+        const val KEY_STRICT_EXTENSION_LANGUAGE_FILTER = "strict_extension_language_filter"
         const val KEY_EXTENSION_INSTALL_POLICIES = "extension_install_policies"
         const val KEY_LOCAL_APK_HOT_RELOAD = "local_apk_hot_reload"
         const val KEY_GITHUB_MIRROR = "github_mirror"

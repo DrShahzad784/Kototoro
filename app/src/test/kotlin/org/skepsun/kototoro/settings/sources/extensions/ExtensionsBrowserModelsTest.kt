@@ -207,6 +207,41 @@ class ExtensionsBrowserModelsTest : FunSpec({
 		listOf("all", "en").selectExtensionLanguageCode() shouldBe "en"
 		listOf("ja", "en").selectExtensionLanguageCode() shouldBe ""
 	}
+
+	test("strict language filter excludes multi-language and unspecified extensions") {
+		val zhExt = availableExtension(packageName = "ext.zh", name = "ZH Ext", lang = "zh")
+		val allExt = availableExtension(packageName = "ext.all", name = "All Ext", lang = "all")
+		val jaExt = availableExtension(packageName = "ext.ja", name = "JA Ext", lang = "ja")
+		val available = listOf(zhExt, allExt, jaExt)
+
+		val relaxedItems = buildExtensionsBrowserItems(
+			type = ExternalExtensionType.MIHON,
+			installed = emptyList(),
+			available = available,
+			downloadStates = emptyMap(),
+			selectedExtensionLanguages = setOf("zh"),
+			collapsedLanguageGroups = emptySet(),
+			query = "",
+			isTrustedPackage = { _, _ -> true },
+			isStrictLanguageFilter = false,
+		).filterIsInstance<ExtensionsBrowserListItem.Entry>()
+
+		relaxedItems.map { it.pkgName } shouldBe listOf("ext.zh", "ext.all")
+
+		val strictItems = buildExtensionsBrowserItems(
+			type = ExternalExtensionType.MIHON,
+			installed = emptyList(),
+			available = available,
+			downloadStates = emptyMap(),
+			selectedExtensionLanguages = setOf("zh"),
+			collapsedLanguageGroups = emptySet(),
+			query = "",
+			isTrustedPackage = { _, _ -> true },
+			isStrictLanguageFilter = true,
+		).filterIsInstance<ExtensionsBrowserListItem.Entry>()
+
+		strictItems.map { it.pkgName } shouldBe listOf("ext.zh")
+	}
 })
 
 private fun installedEntry(

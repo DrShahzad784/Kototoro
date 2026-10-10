@@ -43,6 +43,21 @@ class LNReaderRepoViewModel @Inject constructor(
     ) { extensionLanguages }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), appSettings.extensionLanguages)
 
+    private val isStrictExtensionLanguageFilter: StateFlow<Boolean> = appSettings.observeAsFlow(
+        AppSettings.KEY_STRICT_EXTENSION_LANGUAGE_FILTER,
+    ) { isStrictExtensionLanguageFilter }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), appSettings.isStrictExtensionLanguageFilter)
+
+    private val languageFilterInputs: StateFlow<Pair<Set<String>, Boolean>> = combine(
+        selectedExtensionLanguages,
+        isStrictExtensionLanguageFilter,
+        ::Pair,
+    ).stateIn(
+        viewModelScope,
+        SharingStarted.WhileSubscribed(5000),
+        appSettings.extensionLanguages to appSettings.isStrictExtensionLanguageFilter,
+    )
+
     private val _collapsedLanguageGroups = MutableStateFlow<Set<String>>(emptySet())
     val collapsedLanguageGroups: StateFlow<Set<String>> = _collapsedLanguageGroups.asStateFlow()
 
@@ -84,10 +99,11 @@ class LNReaderRepoViewModel @Inject constructor(
     val displayPlugins: StateFlow<List<PluginDisplayItem>> = combine(
         _plugins,
         _searchQuery,
-        selectedExtensionLanguages,
+        languageFilterInputs,
         _collapsedLanguageGroups,
         installedSourceIds,
-    ) { plugins, query, selectedLanguages, collapsedGroups, installed ->
+    ) { plugins, query, langInputs, collapsedGroups, installed ->
+        val (selectedLanguages, isStrict) = langInputs
         val normalizedSelectedLanguages = selectedLanguages
             .mapTo(LinkedHashSet()) { it.normalizeExtensionLanguageCode() }
             .filterTo(LinkedHashSet()) { it.isNotBlank() }
@@ -96,8 +112,11 @@ class LNReaderRepoViewModel @Inject constructor(
                 val matchesQuery = query.isBlank() || p.name.contains(query, ignoreCase = true) || p.site.contains(query, ignoreCase = true)
                 val normalizedLanguage = p.normalizedLanguageCode()
                 val matchesLang = normalizedSelectedLanguages.isEmpty() ||
-                    normalizedLanguage.isBlank() ||
-                    normalizedLanguage in normalizedSelectedLanguages
+                    if (isStrict) {
+                        normalizedLanguage.isNotBlank() && normalizedLanguage in normalizedSelectedLanguages
+                    } else {
+                        normalizedLanguage.isBlank() || normalizedLanguage in normalizedSelectedLanguages
+                    }
                 matchesQuery && matchesLang
             }
 

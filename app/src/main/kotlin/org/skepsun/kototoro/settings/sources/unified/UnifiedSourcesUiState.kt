@@ -27,6 +27,7 @@ data class UnifiedSourcesFilterState(
     val contentTypes: Set<ContentType> = emptySet(),
     val repositoryId: String? = null,
     val languages: Set<String> = emptySet(),
+    val isStrictLanguageFilter: Boolean = false,
     val locationTypes: Set<UnifiedRepositoryLocationType> = emptySet(),
     val enabledFilter: UnifiedEnabledFilter = UnifiedEnabledFilter.ALL,
     val availabilityFilter: UnifiedAvailabilityFilter = UnifiedAvailabilityFilter.AVAILABLE,

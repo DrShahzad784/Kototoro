@@ -2380,6 +2380,8 @@ SHA-256 指紋:
     <string name="url_donate">https://ko-fi.com/skepsun</string>
     <string name="use_default_cover">使用默認封面</string>
     <string name="use_setup_wizard_languages">使用嚮導語言</string>
+    <string name="strict_language_filter">嚴格語言過濾</string>
+    <string name="strict_language_filter_summary">過濾時隱藏未指定或多語言擴充</string>
     <string name="user_manual">用戶手冊</string>
     <string name="username_password_enter_hint">請輸入用戶名和密碼以繼續</string>
     <string name="users">用戶</string>

@@ -2636,6 +2636,8 @@
     <string name="filter_extensions_by_selected_content_languages">Filter extensions: selected content languages</string>
     <string name="filter_extensions_by_language_with_value">Filter extensions: %1$s</string>
     <string name="use_setup_wizard_languages">Use wizard languages</string>
+    <string name="strict_language_filter">Strict language filter</string>
+    <string name="strict_language_filter_summary">Hide extensions with unspecified or multiple languages</string>
     <string name="repositories">Repositories</string>
     <string name="tvbox_repository_selector">TVBox repository: %1$s</string>
     <string name="packages">Packages</string>
