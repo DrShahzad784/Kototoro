@@ -5,7 +5,11 @@ import com.googlecode.d2j.dex.Dex2jar
 import com.googlecode.d2j.dex.DexExceptionHandler
 import com.googlecode.d2j.node.DexMethodNode
 import com.googlecode.d2j.reader.DexFileReader
+import org.objectweb.asm.ClassReader
+import org.objectweb.asm.ClassVisitor
+import org.objectweb.asm.ClassWriter
 import org.objectweb.asm.MethodVisitor
+import org.objectweb.asm.Opcodes
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
@@ -40,7 +44,7 @@ data class DexConversionReport(
 /** Converts every `classes*.dex` of an APK or DEX-only plugin jar into one class-file jar. */
 object DexJarConverter {
     /** Bump when the library or its settings change: converted artifacts are cached under this version. */
-    const val VERSION = 3
+    const val VERSION = 4
 
     private const val MAXIMUM_DEX_BYTES = 128L * 1024 * 1024
     private const val MAXIMUM_BROKEN_RECORDED = 64
@@ -150,7 +154,10 @@ object DexJarConverter {
                 for (entry in zip.entries()) {
                     if (entry.isDirectory || !written.add(entry.name)) continue
                     output.putNextEntry(ZipEntry(entry.name).apply { time = 0 })
-                    zip.getInputStream(entry).use { it.copyTo(output) }
+                    zip.getInputStream(entry).use { input ->
+                        if (entry.name.endsWith(".class")) output.write(correctFallbackFrames(input.readBytes()))
+                        else input.copyTo(output)
+                    }
                     output.closeEntry()
                     if (entry.name.endsWith(".class")) count++
                 }
@@ -163,6 +170,40 @@ object DexJarConverter {
         } finally {
             Files.deleteIfExists(converted)
         }
+    }
+
+    /** dex2jar 2.4.38 misspells its unresolved common-parent fallback as java/util/Object. */
+    private fun correctFallbackFrames(bytes: ByteArray): ByteArray {
+        val writer = ClassWriter(0)
+        ClassReader(bytes).accept(object : ClassVisitor(Opcodes.ASM9, writer) {
+            override fun visitMethod(
+                access: Int,
+                name: String,
+                descriptor: String,
+                signature: String?,
+                exceptions: Array<out String>?,
+            ): MethodVisitor =
+                object : MethodVisitor(Opcodes.ASM9, super.visitMethod(access, name, descriptor, signature, exceptions)) {
+                    override fun visitFrame(
+                        type: Int,
+                        numLocal: Int,
+                        local: Array<out Any>?,
+                        numStack: Int,
+                        stack: Array<out Any>?,
+                    ) {
+                        fun corrected(values: Array<out Any>?): Array<Any>? = values?.map { value ->
+                            when {
+                                value == "java/util/Object" -> "java/lang/Object"
+                                value is String && value.startsWith('[') && value.endsWith("Ljava/util/Object;") ->
+                                    value.replace("Ljava/util/Object;", "Ljava/lang/Object;")
+                                else -> value
+                            }
+                        }?.toTypedArray()
+                        super.visitFrame(type, numLocal, corrected(local), numStack, corrected(stack))
+                    }
+                }
+        }, 0)
+        return writer.toByteArray()
     }
 
     /** Service registrations survive conversion of a plugin jar; they are tiny and host-relevant. */
