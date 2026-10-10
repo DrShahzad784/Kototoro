@@ -30,3 +30,11 @@ application {
 tasks.withType(Test).configureEach {
 	useJUnitPlatform()
 }
+
+// The iOS JNI smoke harness reuses the independent Java fixture, not third-party API binaries.
+tasks.register('exportEmbeddedFixture', JavaExec) {
+	dependsOn tasks.named('testClasses')
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass = 'org.skepsun.kototoro.source.host.EmbeddedFixtureExporterKt'
+	args layout.buildDirectory.dir('embedded-fixture').get().asFile.absolutePath
+}

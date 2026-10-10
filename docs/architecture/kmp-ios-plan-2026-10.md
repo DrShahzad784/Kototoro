@@ -16,14 +16,19 @@
   和原生标准 PreferenceScreen 控制树/变更协议（§32）；可选 `:mihon-desktop-compat` 已提供基础
   Windows 平台初始化及真实 API 离线测试（§33），WebView2 离线 HTML/JS/Cookie 桥（§34），
   可选 Compose Desktop 的浏览/搜索/详情/收藏/章节图片/历史/标准设置入口（§35）。
-  完整桌面能力/安装包/其余平台服务、iOS C/JNI 桥、
-  OpenJDK 镜像和真机源验收仍未完成。
+  完整桌面能力/安装包/其余平台服务及 iOS 真机源验收仍未完成；iOS 模拟器 C/JNI/Zero 见 §91，
+  真实 APK 详情与基本图片阅读见 §92。
   S0（真机评估）、S3（许可证）尚未开始
+- iOS 原生开发已启动（2026-10-10，§90）：新增 `ios-shared` 与 SwiftUI `iosApp`，共享模块的模拟器目标
+  原生编译/framework 链接、Room v84 持久化和 SwiftUI 分类创建/重启恢复已验证。
+  模拟器嵌入式 JVM、共享源协议与真实再漫画 APK 列表已打通（§91），详情/封面/章节与基本图片阅读
+  已验证（§92）；完整阅读场景与 G0/G2 真机门槛仍待。
 - 目标：共享一个 KMP 内核，同时支持 iOS 与 Windows；iOS 用 SwiftUI 外壳和嵌入式 JVM，Windows
   用 JVM 桌面外壳并优先承载调试。源（Mihon JAR、Kotatsu 解析器、Legado 规则）复用同一个 JVM host。
 - 前提假设：az4521 的 TachiyomiAZ iOS 路线（OpenJDK Mobile Zero + Suwayomi AndroidCompat）在真机上
   可用。该前提**尚未由我们验证**，由 §5 的 G0 门槛负责证实或证伪
 - 关联文档：
+  - [iOS 开发阶段交接记录](./ios-development-handoff-2026-10.md)（§90–§92 的接手入口与本地复验指南）
   - [Scene Reader 改进计划](./reader-scene-improvement-plan-2026-09.md)（§8.2 曾约定"无真实多平台消费者之前不引入 KMP"）
   - [Browser Transport 实施计划](./browser-transport-plan-2026-08.md)（Cloudflare 策略选择器）
   - [Legado Runtime 抽取方案](./legado-runtime-extraction-plan.md)
@@ -2086,7 +2091,7 @@ W3 接口与验证见 §35，iOS 原生和许可门槛继续独立推进。
 - 开发 classpath 顺序从 compat 的 `suppliedCompatibilityRuntime` 配置复用，仅加入 run/test；
   普通 runtimeClasspath/默认 Android/source-host 发行不附外部 SDK，Windows EXE/MSI 尚未交付。
 
-启动文档见 [desktop-app README](../../desktop-app/README.md)。本机可运行：
+启动文档见仓库 `desktop-app/README.md`。本机可运行：
 
 ```powershell
 ./desktop-app/run-windows.ps1 -CompatibilityDirectory "D:/tmp/kt-compat36" -JavaVersion 25
@@ -4932,3 +4937,182 @@ Android 的 R' = A − R + 1；护眼系数 0.92。Android 的 `ReaderColorFilte
   图片/空摘要的旧数字位置仍无法保证跨引擎对应，没有升级或重写旧数据。
 - iOS 尚需原生 HTML 适配器与原生构建验证；Android 真机分页/滚动跳转和视觉验收仍待。
   Windows 小说笔记/标记、正文搜索、翻译/TTS 及分页/双页引擎继续推进。
+
+## 90. iOS 原生启动、共享 framework 与 Room 持久化（2026-10-10）
+
+**实现范围**
+
+- 新增 `:ios-shared` 平台装配模块，声明 iosArm64、iosSimulatorArm64 和 `KototoroShared` 静态 framework /
+  XCFramework。复用 `core-db`、`core-domain`、`core-backup`、`core-source`、`core-net`、`reader-core`；
+  Swift 只消费分类应用接口，Room 与 parser 类型不向 Swift 整体导出。模块有实际源码，避免空模块
+  `NO-SOURCE` 但没有 framework 的假成功。
+- `IosLibrary` 直接装配既有 `MangaDatabase` 与已固定的 sqlite-bundled 2.6.2，查询运行在 Native IO dispatcher。
+  Swift 创建 Application Support/Kototoro 目录并传入绝对数据库文件路径；使用同一 v84 schema，
+  没有新增表、迁移或破坏性回退。
+- 分类读取复用既有 DAO；新建分类在 writer immediate transaction 内分配排序键并写入。空白标题拒绝、
+  有效标题去除两端空白，采用共享 `ListSortOrder.NEWEST`。构造与 suspend 方法声明 `@Throws`，
+  让 Swift 接收错误并显示重试，而不是因未声明的 Kotlin 异常直接终止进程。
+- `iosApp/Kototoro.xcodeproj` 是可直接打开的共享 scheme 工程，无 CocoaPods/XcodeGen 依赖。
+  Xcode 构建阶段调用 `embedAndSignAppleFrameworkForXcode`；模拟器排除 x86_64，匹配现有 Apple Silicon
+  KMP targets。使用 SwiftUI/NavigationStack/TabView，提供漫画库分类、新建分类表单、浏览未接入提示与设置。
+  Swift 的 MainActor model 管理应用生命周期内的数据库实例，读写异步进入 Kotlin；源码没有复制 Android UI。
+
+**原生验证**
+
+- 环境：Apple Silicon Mac、Xcode 27.0（27A266a）、iOS 27.0 runtime（24A434）。创建专用
+  `Kototoro iPhone`（iPhone 18 Pro）模拟器；此前只有 runtime，没有可用 device。
+- `core-db` 的 iosSimulatorArm64 KSP 生成/编译及其 parser-api 依赖通过；core-domain、core-backup、core-net、
+  core-source、reader-core 的模拟器原生编译通过，`ios-shared:linkDebugFrameworkIosSimulatorArm64` 通过。
+- iosArm64 的同组模块编译、Room KSP 生成与 framework 链接也通过；
+  `ios-shared:assembleKototoroSharedDebugXCFramework` 成功产出真机 Arm64 + 模拟器 Arm64 两个切片，
+  路径为 `ios-shared/build/XCFrameworks/debug/KototoroShared.xcframework`。这不代表真机运行验收。
+- `ios-shared:iosSimulatorArm64Test`：2 项，0 失败/跳过。真实 Room 分类写入、关闭并重开数据库，
+  校验同一 ID/中文标题与顺序；空白标题不写入；相对数据库路径被拒绝。
+- `xcodebuild ... test`：Swift/静态 framework 集成构建与 XCTest UI 测试通过，1 项、0 失败。
+  新建表单默认禁用空标题保存；通过 UI 写入唯一分类，终止并重新启动应用，确认同一分类仍显示。
+- 实际应用沙盒数据库经 sqlite3 只读检查：`user_version=84`，36 张应用表，分类记录与 UI 一致。
+  空漫画库与重启后分类截图已实际检查，产物在忽略的 `iosApp/build/reports`。
+- `:app:compileDebugKotlin` 最终通过。首次检查遇到工作区另一处正在修改的 LNReaderRepoViewModel
+  `observeAsFlow` 参数错误，该文件更新后复查成功；本轮没有修改这部分 Android 代码。
+- 首次工具链自动下载 Kotlin/Native LLVM/libffi。Apple 依赖下载超时后使用本地 127.0.0.1:7890 代理。
+  Native 的 `Dispatchers.IO` 需要显式导入 `kotlinx.coroutines.IO`；Groovy XCFramework 使用
+  `XCFrameworkConfig(project, name)`，不能直接使用 Kotlin DSL 的工厂函数名称当构造器。
+
+**原则与接续门槛**
+
+- 共享业务继续保留在既有模块，iOS 只承担平台装配和 Swift 友好投影；复用既有 DAO/schema/排序规则，
+  没有平行数据库、额外 DI 框架或新版本依赖。参照
+  [Room KMP 官方指南](https://developer.android.com/kotlin/multiplatform/room) 与
+  [Kotlin direct integration](https://kotlinlang.org/docs/multiplatform/multiplatform-direct-integration.html)，
+  保持本项目 Room 2.8.4 与工具链版本，没有按最新版示例迁移 Room 3。
+- 这是 iOS 首个存储/外壳切片；还不能正常添加来源漫画或阅读。framework 包含共享模块依赖不等于
+  备份恢复、HTTP 引擎、同步服务或阅读器已经装配。
+- 下一批仍采用原方案：固定并核对 TachiyomiAzIOS/TachiyomiAZ 的 OpenJDK Mobile Zero、AndroidCompat、
+  C/JNI/WKWebView 桥与许可，再将现有 JVM source-host 接入 core-source。没有复制或分发上游代码/运行时。
+  [上游 IOS_PORT.md](https://github.com/az4521/TachiyomiAZ/blob/master/IOS_PORT.md) 记录模拟器 VM 启动
+  需要 `MAP_JIT`、W^X、`pthread_jit_write_protect_np` 三处专用补丁，应独立验证。
+- 本轮不将 S0/G0/G2/S3 标为完成；真机安装、Zero 启动/内存/网络/JS/图形/Cloudflare 场景仍需验收。
+  本机运行与测试命令见仓库中的 `iosApp/README.md`。
+
+## 91. iOS 模拟器 Zero / C-JNI 与真实 Mihon APK 列表（2026-10-10）
+
+**已实现的调用链**
+
+`SwiftUI → IosSources → core-source/SourceProtocolClient → NativeSourceTransport → C/JNI →
+EmbeddedSourceHost → SourceHostSession → 同一 SourceEndpoint/MihonSourceRuntime`。
+Swift 不重复定义协议版本、请求 ID 校验、错误码或 64 位 ID 规则。Kotlin/Native 负责 IO dispatcher 与
+Swift DTO 投影；C/JNI 只负责 VM 启动、Java global reference、线程附着、UTF-16 和资源释放。
+
+- `SourceHostSession` 抽出原 JSONL 内部的常驻平台/registry/endpoint，JSONL 与 JNI 共用生命周期。
+  `exchange`/关闭串行化，关闭幂等，初始化失败按 registry → platform → preferences 清理；错误保留 suppressed。
+  `EmbeddedSourceHost.open` 提供静态 JNI ABI，配置目录必须绝对路径。没有启动子进程或重写源执行器。
+- 原生桥创建一个进程级 VM，拒绝同一进程内的不同配置；VM 留到进程退出，close 只释放 Java 会话。
+  每个调用独立获取 JNIEnv/local frame，并按需附着/分离线程，JNIEnv 不跨线程保存。
+  文本按显式长度的 UTF-16 传输，避免 modified UTF-8 对中文/emoji/NUL 的影响。
+- `MihonIosPlatform` 是可选 JVM 适配器，用本地固定的 Mobile API、独立 Application、持久化偏好桥、
+  兼容主 Looper、Koin/Injekt 与源客户端初始化；不是服务端启动器，也没有调用上游 ExtensionHost。
+  Mobile API 的 AndroidCompat/server 与 Windows 的 pin 不同，保持两个适配器的构建与摘要独立。
+- Swift 浏览页支持源枚举与第一页列表，区分独立测试源和真实 APK 验证预览。普通构建默认关闭嵌入式 JVM，
+  不打包第三方运行时。各预览使用独立 DerivedData，默认构建会拒绝复用带 JVM 资源的产物目录。
+
+**运行时来源与可复验构建**
+
+- 固定 TachiyomiAzIOS `b86cead7dd1387b09c71e7f4b15c1e020463e422`、OpenJDK Mobile
+  `ad8bb1b065bf230d193a1dfd0ebd39a8b1fedf53`、TachiyomiAZ 模拟器补丁来源
+  `820a5cf20bdd7eba189437be6fa5b21daa504cec`。下载摘要集中在 `iosApp/Scripts/jvm-preview-pins.json`。
+- 自有脚本在 ignored build 中下载完整原始源码/许可证，执行固定的 iOS 路径/静态符号补丁与模拟器
+  MAP_JIT/W^X/dlsym 补丁；没有执行上游脚本中的 Git reset/clean 或原有目录清理。
+  GNU m4/autoconf 安装到 build/tools，不修改系统工具。JDK 24 启动编译，目标为 iOS 17 arm64 Simulator Zero。
+  参考 [上游模拟器构建脚本](https://github.com/az4521/TachiyomiAZ/blob/820a5cf20bdd7eba189437be6fa5b21daa504cec/iosApp/Scripts/rebuild-jvm-simulator.sh)。
+- Java 26 模块镜像、配置、cacerts 与 legal 取自已校验的 v8.9.1 IPA；只复用匹配固定源版本的模块数据。
+  模拟器的 native VM 重新编译，没有将真机 IPA 的原生二进制当作模拟器库。
+- 已用另一棵干净源码树执行 `build-jvm-preview.py` 成功。`stage-mihon-preview.py` 生成真实 APK 配置和
+  编号 classpath；运行时、上游 JAR、APK、源码、截图与日志都在 ignored `iosApp/build`，不进入默认发行包。
+  完整命令见 `iosApp/README.md`。
+
+**真实 APK 与修复**
+
+- 样本为再漫画 1.6.0 / versionCode 106000，公开下载 APK SHA-256 为
+  `f6605e36a7d1453b60814bb6f7340a8f724183b11ee3f95e02d9542753ba81fe`。
+  使用现有 `ApkExtensionConverter` / dex2jar 2.4.38 转换，不安装 APK，也不使用下载到的官方预转换 JAR替代闭环。
+  同一 JVM host 加载生成产物，iOS 模拟器枚举出 `MIHON_524579092615598717`，在线第一页返回 10 项。
+- 首次转换输出含不存在的 `java/util/Object`。原 DEX 没有该类型；固定 dex2jar 源码的
+  `getCommonSuperClass` 异常回退分支写错了 Object 包名。最小 smali 用例在转换 classpath 缺少外部父类型
+  时复现 JVM NoClassDefFoundError；仅纠正输出栈帧的该回退类型，两条分支验证并执行通过。
+  未改指令/字段/字符串；转换缓存版本升为 4，Windows 同一转换入口也消费这个修复。
+- 首次在线列表失败为预览依赖筛选误排除了 `serialization-json-okio`，导致缺失 `OkioStreamsKt`。
+  保留独立适配 JAR，基础 serialization/coroutines/Kotlin 仍使用共享版本；无依赖升级。
+  本机 JVM 对同一转换产物返回 10 项，模拟器 XCTest 也通过；临时诊断代码已移除。
+
+**验证与边界**
+
+- source-host：89 项，0 失败/跳过；包括原 JSONL、初始化失败清理和新增 JNI ABI/常驻会话。
+- dex-convert：15 项，0 失败；2 项未配置真实小说/动漫样本而跳过，13 项执行通过。
+  新栈帧用例先红后绿，并重新加载原始再漫画 APK 的转换产物通过。
+- C/JNI 本机烟测：中文、emoji、NUL、64 位源 ID、20 次多线程列表调用、错误恢复及关闭通过。
+- ios-shared Native：2 项数据库回归通过；普通 SwiftUI 分类持久化测试通过。
+  独立 fixture 的 Zero/JNI 源列表与进程重启通过；真实 APK 的模拟器源枚举与在线列表测试通过。
+- 证据：`iosApp/build/jvm-preview-repro.log`、`jni-smoke.log`、`ios-host-final-tests.log`、
+  `dex-frame-red.log` / `dex-frame-green.log`、`ios-default-final-test.log`、`ios-jvm-final-test.log`、
+  `ios-real-apk-final-test.log` 和 `ios-android-final-compile.log`。XCTest 的真实列表截图已导出并实际检查。
+  最新 CLI 转换结果与模拟器已验证的 JAR SHA-256 一致；Android Kotlin 编译通过。
+- 本轮是 arm64 模拟器的真实源列表切片，不将 S0/G0/G2/S3 标为完成。真机 Zero、内存/性能与分发许可仍待。
+  用户扩展导入/更新界面、搜索/详情/阅读、WKWebView/WebKit Cookie、JavaScript 与图形 native 方法尚未接入。
+  单个真实公开列表成功不能推出全量扩展兼容性；没有使用用户 Cookie、扩展设置或库数据。
+
+
+## 92. iOS 真实 APK 详情 / 封面 / 章节与基本图片阅读（2026-10-10）
+
+**已实现的用户流程**
+
+浏览结果点击漫画 → 详情/作者/标签/封面/章节 → 章节图片 → 前后翻页与同分支换章 → 返回详情/浏览。
+默认构建保持原有分类库入口；阅读流程使用 §91 的可选嵌入式 JVM 预览与同一源会话。
+
+- `IosSourceContent` / `IosSourceChapter` / `IosSourcePage` 保留内部完整共享对象，只导出 Swift 所需的
+  字段。调用 `details` / `pages` / `image` / `cover` 时传回原对象，不从标题/URL 重建协议请求，
+  因而保留 extension memo、chapter sourceData、页 headers、原生 index 与 image URL fragment。
+  Swift 的 ID 仍为十进制字符串；共享协议与源执行器未复制。
+- 新增 SwiftUI 详情与基本图片阅读页，借用父浏览页的 `IosSources`；子页面退出不关闭常驻 VM。
+  前后章节继续消费 `SourceChapterNavigation` 的来源/分支规则，保留共享章节顺序。
+- 封面/正文均通过 JVM `fetchCover` / `fetchImage` 下载和 `FileSourceImageStore` 物化；
+  iOS 只消费已处理的文件，不用独立 HTTP 请求绕过扩展 headers、Cookie 或 image interceptors。
+  native consumer 与 host 固定共享应用沙盒 `Kototoro/sources/images`。
+- 新增 `SourceImageFile`：只接受摘要对应的单文件名，拒绝符号链接，校验大小/64 MiB 上限和 SHA-256，
+  再在后台使用 ImageIO 解码。长边限制 4096 像素，阅读器只保留当前页的解码图片；
+  没有把章节所有页一次载入内存。文件校验/解码由同一 loader 供封面和正文复用。
+  参照 [Apple ImageIO 缩略图像素上限](https://developer.apple.com/documentation/imageio/kcgimagesourcethumbnailmaxpixelsize)
+  与 [SwiftUI NavigationLink](https://developer.apple.com/documentation/swiftui/navigationlink)。
+- UI 区分请求失败、空章节/页列表与图片解码失败；可重试；切页/换章重置图片与页码。
+  Swift Task 取消后不应用过期结果，请求标识避免重入任务清除新任务的 loading 状态。
+  已进入同步 JNI 的请求尚不能被 Swift Task 中断，仍由源 HTTP 客户端超时结束。
+
+**真实源与回归证据**
+
+- 同一再漫画 1.6.0 原始 APK 的共享转换产物：本机 JVM 返回《大理寺日志》详情、392 个章节、
+  首章 2 页，第一张 JPEG 345381 字节、封面 JPEG 33852 字节；未更换 APK 或使用预转换 JAR。
+- iOS 模拟器 XCTest 通过真实 APK 的列表 → 详情/章节 → 第 1 页 → 第 2 页。
+  实际截图已导出并检查：显示封面、章节数，以及可辨认的漫画内容，而不只是图片 URL。
+  图片文件来自 JNI 执行的源请求。
+- Native 回归 4 项通过：原数据库 2 项，加新增 DTO/完整隐藏字段往返与图片/封面身份校验 2 项；
+  新用例包含 Long.MIN_VALUE、Long.MAX_VALUE 及超过 JavaScript 精确范围的页 ID。
+- 独立 JVM fixture 的 XCTest 通过源枚举、进程重启、详情/章节、PNG 解码、前后翻页、首末页按钮、
+  下一章及返回详情/浏览；`SourceImageFileTests` 在模拟器执行生产校验/解码实现，覆盖 PNG 解码、
+  等长篡改、大小错误、越界路径、符号链接、超限和不能解码的 HTML。
+- 既有 host 图片/详情回归 29 项通过：`MihonSourceRuntimeTest` 21 项、`FileSourceImageStoreTest` 8 项。
+  修正自有测试 PNG 的 IDAT CRC（尺寸/字节长度不变），消除 PNG 解码时的 CRC 报错；未修改真实源图片。
+- 默认 SwiftUI 分类创建/重启与图片文件测试通过。日志位于 ignored `iosApp/build`：
+  `ios-reader-native-test.log`、`ios-reader-host-test.log`、`ios-reader-jvm-probe.log`、
+  `ios-reader-default-test.log`、`ios-reader-fixture-final-test.log`、`ios-reader-real-apk-test.log` 与
+  `ios-reader-final-build.log`；
+  真实详情/阅读截图位于 `iosApp/build/reports/real-reader`。
+
+**原则与边界**
+
+- KISS/YAGNI：交付首个基本图片阅读流程，没有先引入新的图像库、网络栈、导航框架或 DI；
+  未改动共享协议、Android 生产代码或依赖版本。
+- DRY/SOLID：共享对象/章节导航/协议/源下载继续由已有模块负责；iOS 分开负责 DTO 投影、
+  文件校验/解码和页面状态，封面与正文共用解码实现。
+- 当前是基本按页图片阅读，未接入完整 `reader-core` 场景、缩放/分块、预读、离线下载、
+  收藏/历史与阅读进度持久化；搜索/列表分页/用户 APK 导入仍待实现。
+  WKWebView、完整 WebKit Cookie、JS/图形 native、真机与 S0/G0/G2/S3 仍按原计划验收。
+  单个公开源的详情/图片成功不代表全量扩展兼容。

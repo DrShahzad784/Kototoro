@@ -1,0 +1,40 @@
+// Opt-in iOS JVM platform. Third-party APIs are supplied locally and never enter the default distribution.
+plugins {
+    id 'org.jetbrains.kotlin.jvm'
+}
+
+kotlin {
+    jvmToolchain(24)
+    compilerOptions { jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11 }
+}
+java {
+    sourceCompatibility = JavaVersion.VERSION_11
+    targetCompatibility = JavaVersion.VERSION_11
+}
+
+def compatibility = providers.gradleProperty('mihonIosCompatibilityDirectory')
+if (!compatibility.isPresent()) throw new GradleException('Set -PmihonIosCompatibilityDirectory to the pinned iOS API directory')
+def directory = file(compatibility.get())
+def pins = new Properties()
+file('compatibility-pins.properties').withInputStream { pins.load(it) }
+pins.each { name, expected ->
+    def artifact = new File(directory, name)
+    if (!artifact.isFile()) throw new GradleException("Missing iOS API: ${artifact}")
+    def actual = java.security.MessageDigest.getInstance('SHA-256').digest(artifact.bytes).encodeHex().toString()
+    if (actual != expected) throw new GradleException("iOS API SHA-256 mismatch: ${name}")
+}
+def apis = fileTree(directory) {
+    include '*.jar'
+    exclude '000-*', 'kotlin-stdlib*', 'kotlinx-coroutines*', 'kotlinx-serialization-core*', 'kotlinx-serialization-json*'
+}
+dependencies {
+    implementation project(':source-host')
+    implementation project(':core-source')
+    compileOnly apis
+}
+
+tasks.register('stagePreview', Copy) {
+    dependsOn tasks.named('jar')
+    from tasks.named('jar')
+    into rootProject.layout.projectDirectory.dir('iosApp/build/jvm/ios-adapter')
+}

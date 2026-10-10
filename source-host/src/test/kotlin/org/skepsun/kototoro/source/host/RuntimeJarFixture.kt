@@ -224,7 +224,8 @@ internal class RuntimeJarFixture(private val root: Path) {
                 public class ImageResponse implements java.io.Closeable {
                     private final java.util.concurrent.CountDownLatch closed = new java.util.concurrent.CountDownLatch(1);
                     private final byte[] bytes = imageMode.equals("html") ? "<html>error</html>".getBytes() :
-                        java.util.Base64.getDecoder().decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aXuoAAAAASUVORK5CYII=");
+                        java.util.Base64.getDecoder().decode(
+                            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=");
                     public int code() { return imageMode.equals("status") ? 403 : 200; }
                     public ImageBody body() { return new ImageBody(); }
                     public class ImageBody {

@@ -1,0 +1,38 @@
+// iOS composition root. Swift sees a small application API, rather than Room or parser implementation types.
+plugins {
+    id 'org.jetbrains.kotlin.multiplatform'
+}
+
+// Accept an existing simulator UUID so native tests can use the same device as the SwiftUI app.
+tasks.withType(org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeSimulatorTest).configureEach {
+    def simulator = providers.gradleProperty('iosSimulatorDevice')
+    if (simulator.isPresent()) device.set(simulator.get())
+}
+
+kotlin {
+    def framework = new org.jetbrains.kotlin.gradle.plugin.mpp.apple.XCFrameworkConfig(project, 'KototoroShared')
+    [iosArm64(), iosSimulatorArm64()].each { target ->
+        target.binaries.framework {
+            baseName = 'KototoroShared'
+            isStatic = true
+            binaryOption('bundleId', 'org.skepsun.kototoro.shared')
+            framework.add(it)
+        }
+    }
+    sourceSets {
+        commonMain.dependencies {
+            implementation project(':core-db')
+            implementation project(':core-domain')
+            implementation project(':core-backup')
+            implementation project(':core-source')
+            implementation project(':core-net')
+            implementation project(':reader-core')
+            // Same pinned driver already used by the shared database's JVM tests.
+            implementation 'androidx.sqlite:sqlite-bundled:2.6.2'
+            implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:${libs.versions.coroutines.get()}"
+        }
+        commonTest.dependencies {
+            implementation kotlin('test')
+        }
+    }
+}

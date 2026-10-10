@@ -45,3 +45,9 @@ tasks.withType(Test).configureEach {
 	providers.gradleProperty('realApkDirectory').orNull?.with { systemProperty 'kototoro.dex.real.apks', it }
 }
 
+tasks.register('convertApk', JavaExec) {
+	dependsOn tasks.named('classes')
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = 'org.skepsun.kototoro.dex.DexConvertCliKt'
+	args providers.gradleProperty('extensionApk').getOrElse(''), providers.gradleProperty('extensionJar').getOrElse('')
+}

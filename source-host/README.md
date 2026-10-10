@@ -202,4 +202,23 @@ bytecode ceiling、单源/多语言 factory、64 位 ID、冲突、失败原子�
 
 下一步是偏好高级控件、相关推荐和完整图片格式/缓存保留管理；动态树的原生 UI 仍待接入。
 CLI 提供 inspect/sources/serve，Windows 桌面平台/界面按计划 §29 推进；
-内容执行入口供平台以库方式装配。JNI、OpenJDK Mobile 构建、WKWebView/Cookie/JS 和 iOS 应用仍待。
+内容执行入口供平台以库方式装配。iOS C/JNI/Zero 与真实 APK 列表切片见 §91 和 `iosApp/README.md`；
+WKWebView/Cookie/JS、图形和真机验收仍待。
+
+## 嵌入式会话
+
+`SourceHostSession.open(config, configurationDirectory, platform)` 持有一个平台、registry 和 endpoint，
+`exchange` 复用这些对象，`close` 等待当前交换并依次关闭 registry、平台和偏好 store。关闭幂等，关闭后拒绝请求；
+初始化失败也尝试释放全部 owner，并将清理失败附加到原始异常。JSONL 的 Reader/Writer 仍由调用方持有。
+
+`EmbeddedSourceHost` 为 JNI 提供稳定同步 ABI：
+
+```text
+static open(String configJson, String absoluteDirectory): EmbeddedSourceHost
+exchange(String requestJson): String
+close(): void
+```
+
+native owner 保留 Java global reference，各调用线程独立获取 JNIEnv；应用级 JVM 在进程退出前保持存活。
+协议仍由同一 `SourceEndpoint` 处理，不新增 iOS 分支或另一套 JSON/schema。自有测试 ABI 导出任务
+`:source-host:exportEmbeddedFixture` 仅用于本地原生测试，不进入普通 source-host 发行包。
