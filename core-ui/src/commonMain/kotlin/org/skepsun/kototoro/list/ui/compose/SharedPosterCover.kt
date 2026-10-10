@@ -40,7 +40,9 @@ fun TabletPosterCover(
     Box(modifier.shadow(2.dp, shape, clip = false).clip(shape)
         .background(MaterialTheme.colorScheme.surfaceVariant).border(0.5.dp, rimBorderBrush, shape)) {
         cover()
-        ContentCardBookSpine(Modifier.align(Alignment.CenterStart), width = 3.5.dp)
+        if (style.posterHeight > style.itemWidth) {
+            ContentCardBookSpine(Modifier.align(Alignment.CenterStart), width = 3.5.dp)
+        }
         overlays()
         if (compactOverlay) CompactGridTitleOverlay(title, compactGridTitleOverlayHeight(style.posterHeight),
             resolveCompactGridTitleFontSize(gridScale), Modifier.align(Alignment.BottomCenter))

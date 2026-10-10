@@ -284,9 +284,12 @@ fun KototoroContentCardGrid(
         posterStyle.itemWidth.value / posterStyle.posterHeight.value
     }
     val coverBounds = rememberDeferredContentCoverBounds()
-    val badgeMetrics = remember(posterStyle.itemWidth) { contentCardBadgeMetricsFor(posterStyle.itemWidth) }
-    val compactTitleTextClearance = remember(posterStyle.posterHeight) {
-        (posterStyle.posterHeight.value * 0.28f).dp.coerceIn(32.dp, 44.dp)
+    val badgeMetrics = remember(posterStyle.itemWidth, posterStyle.posterHeight) {
+        contentCardBadgeMetricsFor(posterStyle.itemWidth, posterStyle.posterHeight)
+    }
+    val compactTitleTextClearance = remember(gridScale, density) {
+        val titleLineHeight = (resolveCompactGridTitleFontSize(gridScale).value + 3.5f).sp
+        with(density) { titleLineHeight.toDp() * 2 } + 6.dp
     }
     val titleFontSize = resolveGridTitleFontSize(gridScale)
     val bottomBadgeLift = if (compactOverlay) compactTitleTextClearance else 0.dp

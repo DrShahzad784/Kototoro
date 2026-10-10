@@ -99,7 +99,10 @@ internal fun buildHistoryCardModel(request: HistoryCardModelRequest): ContentLis
         mode = request.progressMode,
     ).takeIf { it.isValid() }
     return when (request.mode) {
-        ListMode.GRID, ListMode.COMPACT_GRID -> ContentGridModel(
+        ListMode.GRID,
+        ListMode.COMPACT_GRID,
+        ListMode.MOVIE_GRID,
+        ListMode.COMPACT_MOVIE_GRID -> ContentGridModel(
             manga = manga,
             override = override,
             subtitle = row.altTitle?.takeIf { it.isNotBlank() },

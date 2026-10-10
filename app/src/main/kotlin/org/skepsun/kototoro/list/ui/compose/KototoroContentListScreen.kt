@@ -83,7 +83,7 @@ import org.skepsun.kototoro.core.ui.compose.AppLayoutTokens
 import org.skepsun.kototoro.core.ui.compose.VerticalScrollbar
 import org.skepsun.kototoro.core.ui.compose.CompactPosterCardStyle
 import org.skepsun.kototoro.core.ui.compose.CompactTopBarHorizontalPadding
-import org.skepsun.kototoro.core.ui.compose.compactPosterCardStyle
+import org.skepsun.kototoro.core.ui.compose.gridPosterCardStyle
 import org.skepsun.kototoro.core.ui.adaptive.LocalUiPresentationConfig
 import org.skepsun.kototoro.core.ui.adaptive.tvFocusable
 import org.skepsun.kototoro.core.ui.compose.resolveSourceTitleForUi
@@ -373,8 +373,10 @@ fun KototoroContentListScreen(
                 } else {
                 when (listMode) {
                     ListMode.GRID,
-                    ListMode.COMPACT_GRID -> {
-                        val posterStyle = compactPosterCardStyle(gridScale)
+                    ListMode.COMPACT_GRID,
+                    ListMode.MOVIE_GRID,
+                    ListMode.COMPACT_MOVIE_GRID -> {
+                        val posterStyle = listMode.gridPosterCardStyle(gridScale)
                         val actualGridState = gridState ?: rememberLazyGridState()
                         ScrollToTopEffect {
                             scrollToTopAfterPagingSettles(pagingItems) {
@@ -470,7 +472,7 @@ fun KototoroContentListScreen(
                                                 showSourceInfo = showSourceOnCards,
                                                 gridScale = gridScale,
                                                 cardStyle = effectivePosterStyle,
-                                                compactOverlay = listMode == ListMode.COMPACT_GRID,
+                                                compactOverlay = listMode.hasTitleOverlay,
                                                 cellContentPadding = PaddingValues(0.dp),
                                                 uiPrefs = cardUiPrefs,
                                                 focusRequester = firstContentFocusRequester.takeIf {
@@ -1262,7 +1264,9 @@ private fun LoadingStateItem(
 ) {
     when (listMode) {
         ListMode.GRID,
-        ListMode.COMPACT_GRID -> GridLoadingSkeleton(gridScale = gridScale)
+        ListMode.COMPACT_GRID,
+        ListMode.MOVIE_GRID,
+        ListMode.COMPACT_MOVIE_GRID -> GridLoadingSkeleton(listMode = listMode, gridScale = gridScale)
         ListMode.LIST,
         ListMode.DETAILED_LIST -> LinearLoadingSkeleton(isDetailed = listMode == ListMode.DETAILED_LIST)
     }
@@ -1270,35 +1274,39 @@ private fun LoadingStateItem(
 
 @Composable
 private fun GridLoadingSkeleton(
+    listMode: ListMode,
     gridScale: Float,
 ) {
-    val posterStyle = compactPosterCardStyle(gridScale)
-    Row(
+    val posterStyle = listMode.gridPosterCardStyle(gridScale)
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+            .padding(horizontal = GridHorizontalPadding, vertical = 8.dp),
     ) {
-        repeat(3) {
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                SkeletonBlock(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(posterStyle.posterHeight)
-                )
-                SkeletonBlock(
-                    modifier = Modifier
-                        .fillMaxWidth(0.92f)
-                        .height(12.dp)
-                )
-                SkeletonBlock(
-                    modifier = Modifier
-                        .fillMaxWidth(0.68f)
-                        .height(12.dp)
-                )
+        val columns = resolveGridColumnCount(maxWidth, posterStyle.itemWidth, GridSpacing)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(GridSpacing),
+        ) {
+            repeat(columns) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    SkeletonBlock(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .aspectRatio(posterStyle.itemWidth / posterStyle.posterHeight),
+                    )
+                    if (!listMode.hasTitleOverlay) {
+                        SkeletonBlock(
+                            modifier = Modifier.fillMaxWidth(0.92f).height(12.dp),
+                        )
+                        SkeletonBlock(
+                            modifier = Modifier.fillMaxWidth(0.68f).height(12.dp),
+                        )
+                    }
+                }
             }
         }
     }

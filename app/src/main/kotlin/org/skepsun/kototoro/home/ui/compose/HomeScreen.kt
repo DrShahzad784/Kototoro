@@ -49,7 +49,7 @@ import org.skepsun.kototoro.core.prefs.HomeHeroMode
 import org.skepsun.kototoro.core.prefs.ListMode
 import org.skepsun.kototoro.core.prefs.observeAsState
 import org.skepsun.kototoro.core.ui.compose.compactPosterCardStyle
-import org.skepsun.kototoro.core.ui.compose.compactPosterRailCardStyle
+import org.skepsun.kototoro.core.ui.compose.railPosterCardStyle
 import org.skepsun.kototoro.core.ui.compose.CompactTopBarHorizontalPadding
 import org.skepsun.kototoro.core.ui.compose.ScrollToTopEffect
 import org.skepsun.kototoro.core.ui.adaptive.LocalUiPresentationConfig
@@ -170,7 +170,7 @@ fun HomeScreen(
     ) {
         HomeRailStyle(
             listMode = screenPrefs.historyListMode,
-            posterStyle = compactPosterRailCardStyle(screenPrefs.historyGridScale),
+            posterStyle = screenPrefs.historyListMode.railPosterCardStyle(screenPrefs.historyGridScale),
             railRowsPerPage = screenPrefs.historyRailRows,
             gridScale = screenPrefs.historyGridScale,
         )
@@ -182,7 +182,7 @@ fun HomeScreen(
     ) {
         HomeRailStyle(
             listMode = screenPrefs.updatesListMode,
-            posterStyle = compactPosterRailCardStyle(screenPrefs.updatesGridScale),
+            posterStyle = screenPrefs.updatesListMode.railPosterCardStyle(screenPrefs.updatesGridScale),
             railRowsPerPage = screenPrefs.updatesRailRows,
             gridScale = screenPrefs.updatesGridScale,
         )
@@ -194,7 +194,7 @@ fun HomeScreen(
     ) {
         HomeRailStyle(
             listMode = screenPrefs.recommendationsListMode,
-            posterStyle = compactPosterRailCardStyle(screenPrefs.recommendationsGridScale),
+            posterStyle = screenPrefs.recommendationsListMode.railPosterCardStyle(screenPrefs.recommendationsGridScale),
             railRowsPerPage = screenPrefs.recommendationsRailRows,
             gridScale = screenPrefs.recommendationsGridScale,
         )

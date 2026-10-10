@@ -714,4 +714,6 @@ internal fun ListMode.iconRes(): Int = when (this) {
     ListMode.DETAILED_LIST -> R.drawable.ic_list_detailed
     ListMode.GRID,
     ListMode.COMPACT_GRID -> R.drawable.ic_grid
+    ListMode.MOVIE_GRID,
+    ListMode.COMPACT_MOVIE_GRID -> R.drawable.ic_content_video
 }

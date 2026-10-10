@@ -67,8 +67,7 @@ fun ListConfigRoute(
             pendingListMode = it
             viewModel.updateListMode(it)
         },
-        supportsGridSizeSlider = pendingListMode == ListMode.GRID ||
-            pendingListMode == ListMode.COMPACT_GRID ||
+        supportsGridSizeSlider = pendingListMode.isGrid ||
             // Home rails keep the slider visible for every display style so
             // all three sections expose grid size from both entry points
             // (section header sheet and the home paged display options).

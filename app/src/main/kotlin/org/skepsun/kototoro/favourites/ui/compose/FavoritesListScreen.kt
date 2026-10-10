@@ -114,7 +114,7 @@ fun KototoroFavoritesListScreen(
                 FavoritesShelf(
                     state = shelf,
                     gridScale = gridScale,
-                    compactOverlay = listMode == ListMode.COMPACT_GRID,
+                    listMode = listMode,
                     sharedElementInstanceKey = shelfInstanceKey,
                     onItemClick = { item, _, sharedKey ->
                         if (onNavigateToDetails != null) {

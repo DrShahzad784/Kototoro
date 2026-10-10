@@ -23,8 +23,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import org.skepsun.kototoro.R
+import org.skepsun.kototoro.core.prefs.ListMode
 import org.skepsun.kototoro.core.ui.compose.AppLayoutTokens
-import org.skepsun.kototoro.core.ui.compose.compactPosterRailCardStyle
+import org.skepsun.kototoro.core.ui.compose.railPosterCardStyle
 import org.skepsun.kototoro.favourites.domain.library.FavouritesShelfState
 import org.skepsun.kototoro.list.ui.compose.KototoroContentCardGrid
 import org.skepsun.kototoro.list.ui.compose.contentListSharedElementKey
@@ -39,13 +40,13 @@ import org.skepsun.kototoro.list.ui.model.ContentGridModel
 fun FavoritesShelf(
     state: FavouritesShelfState,
     gridScale: Float,
-    compactOverlay: Boolean,
+    listMode: ListMode,
     sharedElementInstanceKey: String,
     onItemClick: (ContentGridModel, Rect?, String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     if (state.items.isEmpty()) return
-    val posterStyle = remember(gridScale) { compactPosterRailCardStyle(gridScale) }
+    val posterStyle = remember(listMode, gridScale) { listMode.railPosterCardStyle(gridScale) }
 
     Column(
         modifier = modifier
@@ -105,7 +106,7 @@ fun FavoritesShelf(
                     cardStyle = posterStyle,
                     // Follows the list mode like the grid below and the home rails: in the
                     // compact grid the title sits on the cover, never under it.
-                    compactOverlay = compactOverlay,
+                    compactOverlay = listMode.hasTitleOverlay,
                     cellContentPadding = PaddingValues(horizontal = 2.dp, vertical = 4.dp),
                     onClick = { bounds -> onItemClick(item, bounds, sharedKey) },
                     onLongClick = {},

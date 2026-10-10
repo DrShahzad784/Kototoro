@@ -80,6 +80,8 @@
     <string name="detailed_list">详情</string>
     <string name="grid">网格</string>
     <string name="compact_grid">紧凑网格</string>
+    <string name="movie_grid">电影</string>
+    <string name="compact_movie_grid">紧凑电影</string>
     <string name="list_mode">视图选项</string>
     <string name="pref_home_hero_style">主页轮播样式</string>
     <string name="pref_home_hero_style_summary">选择主页顶部推荐内容的卡片排布方式</string>

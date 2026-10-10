@@ -36,3 +36,13 @@ fun compactPosterRailCardStyle(gridScale: Float): CompactPosterCardStyle {
         cornerRadius = baseStyle.cornerRadius,
     )
 }
+
+fun moviePosterCardStyle(gridScale: Float): CompactPosterCardStyle {
+    // Keep landscape cards wide enough for titles and corner badges at small grid scales.
+    val width = (176f * gridScale.coerceIn(0.5f, 1.5f)).dp.coerceIn(160.dp, 264.dp)
+    return CompactPosterCardStyle(
+        itemWidth = width,
+        posterHeight = width * (9f / 16f),
+        cornerRadius = ContentCoverCornerRadius,
+    )
+}

@@ -56,9 +56,13 @@ data class ContentCardBadgeMetrics(
     val innerCornerRadius: Dp = 10.dp,
 )
 
-fun contentCardBadgeMetricsFor(coverWidth: Dp): ContentCardBadgeMetrics {
-    val scale = (coverWidth.value / 112f).coerceIn(0.66f, 1.15f)
+fun contentCardBadgeMetricsFor(coverWidth: Dp, coverHeight: Dp? = null): ContentCardBadgeMetrics {
+    // Landscape covers can be wide but short; either dimension can limit the badge size.
+    val widthScale = coverWidth.value / 112f
+    val heightScale = coverHeight?.value?.div(136f) ?: widthScale
+    val scale = minOf(widthScale, heightScale).coerceIn(0.66f, 1.15f)
     val isSmallCard = coverWidth < 80.dp
+    val progressSize = if (isSmallCard) 24.dp else 26.dp
     return ContentCardBadgeMetrics(
         containerHorizontalPadding = 7.dp * scale,
         containerVerticalPadding = 4.dp * scale,
@@ -67,7 +71,7 @@ fun contentCardBadgeMetricsFor(coverWidth: Dp): ContentCardBadgeMetrics {
         textSize = 11.sp * scale,
         outerPadding = 7.dp * scale,
         badgeEdgePadding = 0.dp,
-        progressSize = if (isSmallCard) 24.dp else 26.dp,
+        progressSize = if (coverHeight == null) progressSize else progressSize * scale,
         progressAnchorInset = 8.dp * scale,
         progressSpacing = 4.dp * scale,
         innerCornerRadius = 10.dp * scale,

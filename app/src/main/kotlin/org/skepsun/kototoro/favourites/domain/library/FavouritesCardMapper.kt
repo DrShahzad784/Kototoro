@@ -133,7 +133,10 @@ internal fun buildFavouriteCardModel(request: FavouriteCardModelRequest): Conten
     val progress = row.toReadingProgress(request.progressMode)
     val counter = if (progress?.isCompleted() == true) 0 else row.newChapters
     return when (request.mode) {
-        ListMode.GRID, ListMode.COMPACT_GRID -> ContentGridModel(
+        ListMode.GRID,
+        ListMode.COMPACT_GRID,
+        ListMode.MOVIE_GRID,
+        ListMode.COMPACT_MOVIE_GRID -> ContentGridModel(
             manga = manga,
             override = override,
             subtitle = row.altTitle?.takeIf { it.isNotBlank() },
@@ -227,7 +230,7 @@ private fun FavouriteCardRow.toStubContent(
     val authorsSet = author?.takeUnless { it.isBlank() }?.let { setOf(it) }.orEmpty()
     val tagsSet = when {
         displayTags.isEmpty() -> emptySet()
-        mode == ListMode.GRID || mode == ListMode.COMPACT_GRID -> {
+        mode.isGrid -> {
             val count = minOf(displayTags.size, 3)
             val result = LinkedHashSet<ContentTag>(count)
             for (i in 0 until count) {

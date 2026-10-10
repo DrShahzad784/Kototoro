@@ -116,7 +116,10 @@ internal fun createRetainedPagingSnapshot(
     val unalignedWindowStart =
         (anchorItemIndex - RETAINED_PAGING_SNAPSHOT_ITEMS_BEFORE_ANCHOR).coerceAtLeast(0)
     val windowStart = when (listMode) {
-        ListMode.GRID, ListMode.COMPACT_GRID -> {
+        ListMode.GRID,
+        ListMode.COMPACT_GRID,
+        ListMode.MOVIE_GRID,
+        ListMode.COMPACT_MOVIE_GRID -> {
             // Full-span headers reset the grid row. Align within the current contiguous
             // card run so a bounded snapshot keeps the live list's exact column phase.
             alignRetainedGridWindowStart(loadedItems, unalignedWindowStart, gridSpanCount)

@@ -88,7 +88,10 @@ internal fun buildUpdateCardModel(request: UpdateCardModelRequest): ContentListM
         ScrobblerService.entries.firstOrNull { it.id == id }
     }
     return when (request.mode) {
-        ListMode.GRID, ListMode.COMPACT_GRID -> ContentGridModel(
+        ListMode.GRID,
+        ListMode.COMPACT_GRID,
+        ListMode.MOVIE_GRID,
+        ListMode.COMPACT_MOVIE_GRID -> ContentGridModel(
             manga = manga,
             override = override,
             subtitle = group.altTitle?.takeIf { it.isNotBlank() },

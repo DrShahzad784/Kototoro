@@ -122,7 +122,7 @@ class FavouritesCardMapperTest {
         // The batch mapper skips building the suffix for these modes because it is not part
         // of the model. This is that assumption: if a grid card ever starts showing the
         // source label, mapping a whole library has to format it again.
-        for (mode in listOf(ListMode.GRID, ListMode.COMPACT_GRID)) {
+        for (mode in ListMode.entries.filter { it.isGrid }) {
             val withSuffix = buildFavouriteCardModel(request(mode = mode, sourceLabel = "Current: Test"))
             val withoutSuffix = buildFavouriteCardModel(request(mode = mode, sourceLabel = null))
             assertEquals(withSuffix, withoutSuffix, "$mode must not depend on sourceLabel")

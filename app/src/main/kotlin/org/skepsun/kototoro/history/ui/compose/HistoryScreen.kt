@@ -127,7 +127,10 @@ fun HistoryScreen(
             }
             retainedState?.let { state ->
                 val (firstVisibleIndex, firstVisibleScrollOffset) = when (listMode) {
-                    ListMode.GRID, ListMode.COMPACT_GRID ->
+                    ListMode.GRID,
+                    ListMode.COMPACT_GRID,
+                    ListMode.MOVIE_GRID,
+                    ListMode.COMPACT_MOVIE_GRID ->
                         state.gridState.firstVisibleItemIndex to state.gridState.firstVisibleItemScrollOffset
                     ListMode.LIST ->
                         state.listState.firstVisibleItemIndex to state.listState.firstVisibleItemScrollOffset

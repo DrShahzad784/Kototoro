@@ -199,7 +199,7 @@ internal fun calculateSourceGridColumns(
     metrics: SourceQuickAccessMetrics,
     browseListMode: ListMode,
 ): Int {
-    if (browseListMode != ListMode.GRID && browseListMode != ListMode.COMPACT_GRID) {
+    if (!browseListMode.isGrid) {
         return 1
     }
     val spacing = metrics.gridSpacing
@@ -912,4 +912,3 @@ private fun openTrackingItem(
     }
     return false
 }
-

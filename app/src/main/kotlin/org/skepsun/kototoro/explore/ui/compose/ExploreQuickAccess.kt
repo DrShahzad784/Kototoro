@@ -556,7 +556,7 @@ private fun SourceQuickAccessCard(
     val context = LocalContext.current
     val actualSource = source.source.mangaSource
     val title = actualSource.getTitle(context)
-    val isGridCard = browseListMode == ListMode.GRID || browseListMode == ListMode.COMPACT_GRID
+    val isGridCard = browseListMode.isGrid
     val expressive = LocalMaterialExpressiveComponentsEnabled.current
     val cardShape = RoundedCornerShape(
         when {

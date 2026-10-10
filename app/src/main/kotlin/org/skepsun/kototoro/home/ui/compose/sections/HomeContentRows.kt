@@ -144,7 +144,9 @@ internal fun HomeContentRowSection(
     val railPages = remember(items, listMode, railStyle.railRowsPerPage) {
         when (listMode) {
             ListMode.GRID,
-            ListMode.COMPACT_GRID -> emptyList()
+            ListMode.COMPACT_GRID,
+            ListMode.MOVIE_GRID,
+            ListMode.COMPACT_MOVIE_GRID -> emptyList()
             ListMode.LIST,
             ListMode.DETAILED_LIST -> items.chunked(railStyle.railRowsPerPage)
         }
@@ -173,7 +175,9 @@ internal fun HomeContentRowSection(
         val railAnimationFactor = rememberRailAnimationFactor()
         when (listMode) {
             ListMode.GRID,
-            ListMode.COMPACT_GRID -> {
+            ListMode.COMPACT_GRID,
+            ListMode.MOVIE_GRID,
+            ListMode.COMPACT_MOVIE_GRID -> {
                 LazyRow(
                     state = rowState,
                     flingBehavior = rememberSnapFlingBehavior(rowState),
@@ -339,7 +343,9 @@ private fun HomeListRailRowItem(
         ListMode.LIST -> 52.dp
         ListMode.DETAILED_LIST -> 72.dp
         ListMode.GRID,
-        ListMode.COMPACT_GRID -> 52.dp
+        ListMode.COMPACT_GRID,
+        ListMode.MOVIE_GRID,
+        ListMode.COMPACT_MOVIE_GRID -> 52.dp
     }
     val coverWidth = (baseWidth * gridScale).coerceIn(40.dp, 120.dp)
     val coverSize = HomeListRailCoverSize(width = coverWidth, height = coverWidth * 1.5f)
@@ -550,7 +556,7 @@ private fun HomeCoverRowItem(
         item = model,
         sharedElementInstanceKey = gridInstanceKey,
         cardStyle = posterStyle,
-        compactOverlay = listMode == ListMode.COMPACT_GRID,
+        compactOverlay = listMode.hasTitleOverlay,
         // Tighter than the global grid default: rails sit on a shared screen
         // where every vertical dp of padding compounds across sections.
         cellContentPadding = PaddingValues(horizontal = 2.dp, vertical = 4.dp),
@@ -568,7 +574,9 @@ private fun calculateHomeListRailPageWidth(maxWidth: Dp, listMode: ListMode): Dp
         ListMode.DETAILED_LIST -> referenceWidth * HOME_DETAILED_RAIL_PAGE_WIDTH_RATIO
         ListMode.LIST -> referenceWidth * HOME_LIST_RAIL_PAGE_WIDTH_RATIO
         ListMode.GRID,
-        ListMode.COMPACT_GRID -> referenceWidth * HOME_LIST_RAIL_PAGE_WIDTH_RATIO
+        ListMode.COMPACT_GRID,
+        ListMode.MOVIE_GRID,
+        ListMode.COMPACT_MOVIE_GRID -> referenceWidth * HOME_LIST_RAIL_PAGE_WIDTH_RATIO
     }
     val maxPageWidth = if (listMode == ListMode.DETAILED_LIST) {
         HOME_DETAILED_RAIL_PAGE_MAX_WIDTH

@@ -163,7 +163,7 @@ class HistoryCardMapperTest {
 
     @Test
     fun `favourite membership reaches the heart badge in card modes`() {
-        for (mode in listOf(ListMode.GRID, ListMode.COMPACT_GRID, ListMode.DETAILED_LIST)) {
+        for (mode in ListMode.entries.filter { it.isGrid || it == ListMode.DETAILED_LIST }) {
             assertTrue(
                 hasVisibleCardBadges(setOf("favorite"), buildHistoryCardModel(request(row(isFavourite = true), mode))),
                 "favourite row shows the heart in $mode",

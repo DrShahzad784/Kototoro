@@ -588,7 +588,10 @@ fun AppContentListRoute(
                         ?.items
                         ?: loadedPagingItems
                     val (firstVisibleIndex, firstVisibleScrollOffset) = when (listMode) {
-                        ListMode.GRID, ListMode.COMPACT_GRID ->
+                        ListMode.GRID,
+                        ListMode.COMPACT_GRID,
+                        ListMode.MOVIE_GRID,
+                        ListMode.COMPACT_MOVIE_GRID ->
                             retainedPagingState.gridState.firstVisibleItemIndex to
                                 retainedPagingState.gridState.firstVisibleItemScrollOffset
                         ListMode.LIST ->

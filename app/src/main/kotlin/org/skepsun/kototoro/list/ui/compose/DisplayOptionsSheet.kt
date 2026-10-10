@@ -45,7 +45,7 @@ import org.skepsun.kototoro.core.prefs.AppSettings
 import org.skepsun.kototoro.core.prefs.ListMode
 import org.skepsun.kototoro.core.prefs.observeAsState
 import org.skepsun.kototoro.core.ui.glass.GlassDefaults
-import org.skepsun.kototoro.core.ui.compose.compactPosterCardStyle
+import org.skepsun.kototoro.core.ui.compose.gridPosterCardStyle
 import org.skepsun.kototoro.core.ui.compose.KototoroSheetSurface
 import org.skepsun.kototoro.core.ui.compose.SheetDragHandle
 import org.skepsun.kototoro.core.ui.compose.KototoroSlider
@@ -150,49 +150,10 @@ fun DisplayOptionsSheet(
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                        Column(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalArrangement = Arrangement.spacedBy(4.dp),
-                        ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(12.dp)
-                            ) {
-                                DisplayModeChip(
-                                    iconRes = R.drawable.ic_list,
-                                    label = stringResource(R.string.list),
-                                    selected = currentListMode == ListMode.LIST,
-                                    onClick = { onListModeSelected(ListMode.LIST) },
-                                    modifier = Modifier.weight(1f)
-                                )
-                                DisplayModeChip(
-                                    iconRes = R.drawable.ic_list_detailed,
-                                    label = stringResource(R.string.details),
-                                    selected = currentListMode == ListMode.DETAILED_LIST,
-                                    onClick = { onListModeSelected(ListMode.DETAILED_LIST) },
-                                    modifier = Modifier.weight(1f)
-                                )
-                            }
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(12.dp)
-                            ) {
-                                DisplayModeChip(
-                                    iconRes = R.drawable.ic_grid,
-                                    label = stringResource(R.string.grid),
-                                    selected = currentListMode == ListMode.GRID,
-                                    onClick = { onListModeSelected(ListMode.GRID) },
-                                    modifier = Modifier.weight(1f)
-                                )
-                                DisplayModeChip(
-                                    iconRes = R.drawable.ic_grid,
-                                    label = stringResource(R.string.compact_grid),
-                                    selected = currentListMode == ListMode.COMPACT_GRID,
-                                    onClick = { onListModeSelected(ListMode.COMPACT_GRID) },
-                                    modifier = Modifier.weight(1f)
-                                )
-                            }
-                        }
+                        DisplayModeSelector(
+                            currentListMode = currentListMode,
+                            onListModeSelected = onListModeSelected,
+                        )
                     }
 
                     if (supportsGridSizeSlider) {
@@ -353,6 +314,40 @@ private fun GroupingSection(
 }
 
 @Composable
+internal fun DisplayModeSelector(
+    currentListMode: ListMode,
+    onListModeSelected: (ListMode) -> Unit,
+) {
+    val labels = androidx.compose.ui.platform.LocalContext.current.resources.getStringArray(R.array.list_modes)
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        ListMode.entries.chunked(2).forEach { modes ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                modes.forEach { mode ->
+                    DisplayModeChip(
+                        iconRes = when {
+                            mode == ListMode.LIST -> R.drawable.ic_list
+                            mode == ListMode.DETAILED_LIST -> R.drawable.ic_list_detailed
+                            mode.isMovieGrid -> R.drawable.ic_content_video
+                            else -> R.drawable.ic_grid
+                        },
+                        label = labels[mode.ordinal],
+                        selected = currentListMode == mode,
+                        onClick = { onListModeSelected(mode) },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 internal fun DisplayModeChip(
     iconRes: Int,
     label: String,
@@ -446,7 +441,7 @@ private fun resolveGridColumnsHint(
     gridSize: Int,
 ): String? {
     if (!enabled) return null
-    if (listMode != ListMode.GRID && listMode != ListMode.COMPACT_GRID) return null
+    if (!listMode.isGrid) return null
     val density = LocalDensity.current
     val windowWidthPx = LocalWindowInfo.current.containerSize.width
     if (windowWidthPx <= 0) return null
@@ -454,7 +449,7 @@ private fun resolveGridColumnsHint(
     val availableWidth = (windowWidth - GridHorizontalPadding * 2).coerceAtLeast(48.dp)
     val columns = resolveGridColumnCount(
         availableWidth = availableWidth,
-        targetItemWidth = compactPosterCardStyle(gridSize / 100f).itemWidth,
+        targetItemWidth = listMode.gridPosterCardStyle(gridSize / 100f).itemWidth,
         spacing = GridSpacing,
     )
     return stringResource(R.string.grid_size_columns_hint, columns)

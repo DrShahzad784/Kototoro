@@ -278,7 +278,10 @@ internal fun rememberRetainedPagingSnapshotState(
         // left, independent of how the list reordered.
         val targetLayoutIndex = snapshot.liveLayoutOffset + liveAnchorIndex
         when (listMode) {
-            ListMode.GRID, ListMode.COMPACT_GRID -> gridState.requestScrollToItem(
+            ListMode.GRID,
+            ListMode.COMPACT_GRID,
+            ListMode.MOVIE_GRID,
+            ListMode.COMPACT_MOVIE_GRID -> gridState.requestScrollToItem(
                 index = targetLayoutIndex,
                 scrollOffset = snapshot.firstVisibleItemScrollOffset,
             )
@@ -313,7 +316,10 @@ internal fun rememberRetainedPagingSnapshotState(
                 firstVisibleItemScrollOffset = offset,
                 pagingAnchorIndex = pagingAnchorIndex,
                 gridSpanCount = when (mode) {
-                    ListMode.GRID, ListMode.COMPACT_GRID -> gridState.layoutInfo.maxSpan
+                    ListMode.GRID,
+                    ListMode.COMPACT_GRID,
+                    ListMode.MOVIE_GRID,
+                    ListMode.COMPACT_MOVIE_GRID -> gridState.layoutInfo.maxSpan
                     ListMode.LIST, ListMode.DETAILED_LIST -> 1
                 },
             )?.let { host?.retainPagingSnapshot(it) }

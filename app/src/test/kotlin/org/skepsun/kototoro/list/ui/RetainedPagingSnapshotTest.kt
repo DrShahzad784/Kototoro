@@ -39,50 +39,54 @@ class RetainedPagingSnapshotTest {
 
     @Test
     fun `capture preserves grid row phase when bounding the retained window`() {
-        val items = List(1_000) { gridItem(it.toLong()) }
+        for (mode in ListMode.entries.filter { it.isGrid }) {
+            val items = List(1_000) { gridItem(it.toLong()) }
 
-        val snapshot = createRetainedPagingSnapshot(
-            loadedItems = items,
-            clickedItem = items[500],
-            listMode = ListMode.GRID,
-            layoutFirstVisibleIndex = 499,
-            firstVisibleItemScrollOffset = 17,
-            pagingAnchorIndex = 498,
-            gridSpanCount = 3,
-        )
+            val snapshot = createRetainedPagingSnapshot(
+                loadedItems = items,
+                clickedItem = items[500],
+                listMode = mode,
+                layoutFirstVisibleIndex = 499,
+                firstVisibleItemScrollOffset = 17,
+                pagingAnchorIndex = 498,
+                gridSpanCount = 3,
+            )
 
-        requireNotNull(snapshot)
-        val windowStart = items.indexOf(snapshot.items.first())
-        assertEquals(432, windowStart)
-        assertEquals(0, windowStart % 3)
-        assertSame(items[498], snapshot.anchorItem)
-        assertEquals(66, snapshot.anchorItemIndex)
-        assertEquals(67, snapshot.firstVisibleItemIndex)
-        assertEquals(1, snapshot.liveLayoutOffset)
+            requireNotNull(snapshot)
+            val windowStart = items.indexOf(snapshot.items.first())
+            assertEquals(432, windowStart)
+            assertEquals(0, windowStart % 3)
+            assertSame(items[498], snapshot.anchorItem)
+            assertEquals(66, snapshot.anchorItemIndex)
+            assertEquals(67, snapshot.firstVisibleItemIndex)
+            assertEquals(1, snapshot.liveLayoutOffset)
+        }
     }
 
     @Test
     fun `capture preserves grid row phase after a full span group header`() {
-        val items = List<ListModel>(1_000) { gridItem(it.toLong()) }.toMutableList().apply {
-            add(430, ListHeader(1))
+        for (mode in ListMode.entries.filter { it.isGrid }) {
+            val items = List<ListModel>(1_000) { gridItem(it.toLong()) }.toMutableList().apply {
+                add(430, ListHeader(1))
+            }
+
+            val snapshot = createRetainedPagingSnapshot(
+                loadedItems = items,
+                clickedItem = items[500],
+                listMode = mode,
+                layoutFirstVisibleIndex = 499,
+                firstVisibleItemScrollOffset = 17,
+                pagingAnchorIndex = 498,
+                gridSpanCount = 3,
+            )
+
+            requireNotNull(snapshot)
+            assertSame(items[434], snapshot.items.first())
+            assertSame(items[498], snapshot.anchorItem)
+            assertEquals(64, snapshot.anchorItemIndex)
+            assertEquals(65, snapshot.firstVisibleItemIndex)
+            assertEquals(1, snapshot.liveLayoutOffset)
         }
-
-        val snapshot = createRetainedPagingSnapshot(
-            loadedItems = items,
-            clickedItem = items[500],
-            listMode = ListMode.GRID,
-            layoutFirstVisibleIndex = 499,
-            firstVisibleItemScrollOffset = 17,
-            pagingAnchorIndex = 498,
-            gridSpanCount = 3,
-        )
-
-        requireNotNull(snapshot)
-        assertSame(items[434], snapshot.items.first())
-        assertSame(items[498], snapshot.anchorItem)
-        assertEquals(64, snapshot.anchorItemIndex)
-        assertEquals(65, snapshot.firstVisibleItemIndex)
-        assertEquals(1, snapshot.liveLayoutOffset)
     }
 
     @Test

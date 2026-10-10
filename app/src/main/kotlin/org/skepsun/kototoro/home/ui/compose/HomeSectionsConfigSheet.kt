@@ -31,7 +31,7 @@ import org.skepsun.kototoro.core.prefs.observeAsState
 import org.skepsun.kototoro.core.ui.compose.KototoroSheetSurface
 import org.skepsun.kototoro.core.ui.compose.SheetDragHandle
 import org.skepsun.kototoro.core.ui.glass.GlassDefaults
-import org.skepsun.kototoro.list.ui.compose.DisplayModeChip
+import org.skepsun.kototoro.list.ui.compose.DisplayModeSelector
 import org.skepsun.kototoro.list.ui.compose.GridSizeSlider
 import org.skepsun.kototoro.list.ui.compose.RailRowsSelector
 
@@ -190,44 +190,10 @@ private fun HomeSectionConfigContent(
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            DisplayModeChip(
-                iconRes = R.drawable.ic_list,
-                label = stringResource(R.string.list),
-                selected = listMode == ListMode.LIST,
-                onClick = { onListModeSelected(ListMode.LIST) },
-                modifier = Modifier.weight(1f),
-            )
-            DisplayModeChip(
-                iconRes = R.drawable.ic_list_detailed,
-                label = stringResource(R.string.details),
-                selected = listMode == ListMode.DETAILED_LIST,
-                onClick = { onListModeSelected(ListMode.DETAILED_LIST) },
-                modifier = Modifier.weight(1f),
-            )
-        }
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            DisplayModeChip(
-                iconRes = R.drawable.ic_grid,
-                label = stringResource(R.string.grid),
-                selected = listMode == ListMode.GRID,
-                onClick = { onListModeSelected(ListMode.GRID) },
-                modifier = Modifier.weight(1f),
-            )
-            DisplayModeChip(
-                iconRes = R.drawable.ic_grid,
-                label = stringResource(R.string.compact_grid),
-                selected = listMode == ListMode.COMPACT_GRID,
-                onClick = { onListModeSelected(ListMode.COMPACT_GRID) },
-                modifier = Modifier.weight(1f),
-            )
-        }
+        DisplayModeSelector(
+            currentListMode = listMode,
+            onListModeSelected = onListModeSelected,
+        )
 
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
 
@@ -246,4 +212,3 @@ private fun HomeSectionConfigContent(
         }
     }
 }
-
