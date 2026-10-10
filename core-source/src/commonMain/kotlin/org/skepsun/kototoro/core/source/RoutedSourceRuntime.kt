@@ -4,7 +4,9 @@ package org.skepsun.kototoro.core.source
  * One [SourceRuntime] over several ecosystem runtimes. Each source name is served by the first route that owns it,
  * so ecosystems keep their own identity rules (`MIHON_<id>`, parser enum names, ...) without knowing about each other.
  */
-class RoutedSourceRuntime(private val routes: List<Route>) : SourceRuntime {
+class RoutedSourceRuntime(private val routeProvider: () -> List<Route>) : SourceRuntime {
+    constructor(routes: List<Route>) : this({ routes })
+    private val routes: List<Route> get() = routeProvider()
     class Route(val owns: (String) -> Boolean, val runtime: SourceRuntime)
 
     private fun route(sourceName: String): SourceRuntime =

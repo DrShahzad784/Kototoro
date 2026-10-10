@@ -183,6 +183,8 @@ npm run docs:build
   `SourceHostPlatform` 负责兼容层初始化/关闭；config 的相对路径基于其目录，stdout 保留协议、日志转 stderr。
   默认发行包不提供第三方 API；可选 `mihon-desktop-compat` 提供基础初始化 provider，完整 Windows
   平台能力/完整浏览器兼容/分发门槛仍待；桌面 UI 与本地 EXE/ZIP/MSI 已接入。见模块 README 与计划 §25–52。
+- `mihon-ios-compat/` - 可选 iOS（Zero JVM）平台 adapter（`-PwithMihonIosCompat`）：固定 Mobile API 编译，复用
+  `mihon-desktop-compat` 的 Aniyomi ABI 源码，经 `SourceHostRuntimePlatform` 提供 parser-host 的 JAR 路由，见计划 §91–94。
 - `mihon-desktop-compat/` - 可选 JVM 平台 adapter（`-PwithMihonDesktopCompat`）：真实本地 AndroidCompat/
   Suwayomi API 为 compileOnly，五个关键产物验证 SHA-256；独立 Application 委托持久化偏好，
   装配真实 AppModule/NetworkHelper、兼容主 Looper、Koin/Injekt 与 CookieHandler。公开零参数
@@ -201,6 +203,8 @@ npm run docs:build
   完整 WebView API/真实挑战/代表源仍待；资源/系统服务明确 unsupported，HTTP cache 仍在 SDK 临时目录。
   默认 Android/source-host 发行不含第三方 API；Windows 预览锁定 29 个选入外部 JAR，拒绝
   成员/哈希变化，按编号维持打包后的类优先级。Compose 资源目录可定位随包桥，S3 待完成，见计划 §33–52。
+- `source-tvbox/` - 苹果 CMS / TVBox type 0/1 的共享 `SourceRuntime`（KMP 纯 Kotlin，HTTP 由平台注入）：配置导入、
+  JSON/XML 解析，存储格式、`JSON_TVBOX_` ID、`tvbox://` URL 与 ID 哈希同 Android；iOS 默认构建经 Ktor Darwin 原生执行，见计划 §93。
 - `parser-host/` - JVM 上加载 kototoro-parsers / kotatsu-parsers / UMA（Tsuki）插件 JAR：子优先 classloader、
   宿主共享 ABI、`ParserSourceRuntime`（OFFSET 分页、小说 `getChapterContent`）；真实插件用 `-PkototoroParsersJar`、
   `-PdexPluginJar`、`-PparserHostOnline` 选择性验证。

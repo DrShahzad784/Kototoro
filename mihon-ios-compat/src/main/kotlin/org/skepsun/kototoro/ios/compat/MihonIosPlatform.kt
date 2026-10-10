@@ -11,10 +11,17 @@ import okhttp3.OkHttpClient
 import org.koin.core.KoinApplication
 import org.koin.core.context.GlobalContext
 import org.koin.dsl.module
+import org.skepsun.kototoro.core.source.RoutedSourceRuntime
 import org.skepsun.kototoro.core.source.SourcePreferenceStore
+import org.skepsun.kototoro.parserhost.ParserPluginRegistry
+import org.skepsun.kototoro.parserhost.ParserSourceRuntime
 import org.skepsun.kototoro.source.host.FileSourcePreferenceStore
 import org.skepsun.kototoro.source.host.MihonPreferenceBridge
+import org.skepsun.kototoro.source.host.SourceHostPlugin
 import org.skepsun.kototoro.source.host.SourceHostPreferenceUiPlatform
+import org.skepsun.kototoro.source.host.SourceHostRuntimePlatform
+import org.skepsun.kototoro.source.host.SourceHostRuntimes
+import org.skepsun.kototoro.source.host.SourceImageStore
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.InjektScope
 import uy.kohesive.injekt.api.KoinRegistrar
@@ -26,8 +33,11 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
-/** iOS platform for the pinned Mobile API. WKWebView/graphics/JavaScript are not enabled by this adapter. */
-class MihonIosPlatform : SourceHostPreferenceUiPlatform {
+/**
+ * iOS platform for the pinned Mobile API: Mihon / Tsundoku / Aniyomi extensions plus kototoro / kotatsu / UMA parser
+ * JARs on one network client. WKWebView/graphics/JavaScript are not enabled by this adapter.
+ */
+class MihonIosPlatform : SourceHostPreferenceUiPlatform, SourceHostRuntimePlatform {
     private var application: IosApplication? = null
     private var preferences: MihonPreferenceBridge? = null
     private var container: KoinApplication? = null
@@ -37,6 +47,7 @@ class MihonIosPlatform : SourceHostPreferenceUiPlatform {
     private var previousInjekt: InjektScope? = null
     private var previousCookies: CookieHandler? = null
     private var ownedCookies: CookieHandler? = null
+    private var ownsClaim = false
     private var closed = false
 
     override fun initialize(): ClassLoader = error("Persistent preferences are required by the iOS platform")
@@ -47,6 +58,7 @@ class MihonIosPlatform : SourceHostPreferenceUiPlatform {
         synchronized(processOwner) {
             check(!claimed && GlobalContext.getOrNull() == null) { "The JVM already owns a compatibility platform" }
             claimed = true
+            ownsClaim = true
         }
         val root = (preferences as? FileSourcePreferenceStore)?.directory?.parent?.resolve("compat")
             ?: error("File-backed preferences are required by the iOS platform")
@@ -89,6 +101,28 @@ class MihonIosPlatform : SourceHostPreferenceUiPlatform {
     override fun preferenceContext(): Any = requireNotNull(application).also { check(!closed) }
 
     @Synchronized
+    override fun openRuntimes(
+        plugins: List<SourceHostPlugin>,
+        images: SourceImageStore?,
+        preferences: SourcePreferenceStore?,
+    ): SourceHostRuntimes {
+        check(!closed)
+        val parsers = IosParserPlatform(
+            requireNotNull(client) { "Initialize the platform before opening plugin runtimes" },
+            requireNotNull(preferences) { "Parser plugins need persistent preferences" },
+        )
+        val registry = ParserPluginRegistry(parsers)
+        try {
+            for (plugin in plugins) registry.load(Path.of(plugin.path), plugin.id, plugin.sha256)
+        } catch (failure: Throwable) {
+            try { registry.close() } catch (cleanup: Throwable) { failure.addSuppressed(cleanup) }
+            throw failure
+        }
+        val runtime = ParserSourceRuntime(registry, parsers, images)
+        return SourceHostRuntimes(listOf(RoutedSourceRuntime.Route(registry::owns, runtime)), registry)
+    }
+
+    @Synchronized
     override fun close() {
         if (closed) return
         closed = true
@@ -120,6 +154,12 @@ class MihonIosPlatform : SourceHostPreferenceUiPlatform {
             release { Looper.clearMainLooperForTest() }
         }
         application = null; preferences = null; client = null; container = null; thread = null
+        if (ownsClaim) {
+            synchronized(processOwner) {
+                claimed = false
+            }
+            ownsClaim = false
+        }
         failure?.let { throw it }
     }
 

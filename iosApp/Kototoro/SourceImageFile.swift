@@ -5,7 +5,107 @@ import UIKit
 
 /// Decode only the immutable host artifact; networking and source interceptors stay in source-host.
 enum SourceImageFile {
-    static func decode(directory: URL, relativePath: String, sha256: String, byteSize: Int64) throws -> UIImage {
+    static func decode(directory: URL, relativePath: String, sha256: String, byteSize: Int64,
+                       maxPixelSize: Int = 4096) throws -> UIImage {
+        let data = try validatedData(directory: directory, relativePath: relativePath, sha256: sha256, byteSize: byteSize)
+        let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions),
+              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceShouldCacheImmediately: true,
+                kCGImageSourceThumbnailMaxPixelSize: max(1, maxPixelSize),
+              ] as CFDictionary) else { throw failure("无法解码此图片格式") }
+        return UIImage(cgImage: image)
+    }
+
+    static func dimensions(directory: URL, relativePath: String, sha256: String,
+                           byteSize: Int64) throws -> (width: Int, height: Int) {
+        let data = try validatedData(directory: directory, relativePath: relativePath, sha256: sha256, byteSize: byteSize)
+        let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions) else {
+            throw failure("无法解码此图片格式")
+        }
+        if let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+           let width = properties[kCGImagePropertyPixelWidth] as? Int,
+           let height = properties[kCGImagePropertyPixelHeight] as? Int,
+           width > 0, height > 0 {
+            let orientation = (properties[kCGImagePropertyOrientation] as? Int) ?? 1
+            return (5...8).contains(orientation) ? (height, width) : (width, height)
+        }
+        guard let image = CGImageSourceCreateImageAtIndex(source, 0, sourceOptions),
+              image.width > 0, image.height > 0 else {
+            throw failure("无法解码此图片格式")
+        }
+        return (image.width, image.height)
+    }
+
+    static func decodeRegion(directory: URL, relativePath: String, sha256: String, byteSize: Int64,
+                             rect: CGRect, sampleSize: Int = 1) throws -> UIImage {
+        let data = try validatedData(directory: directory, relativePath: relativePath, sha256: sha256, byteSize: byteSize)
+        let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions),
+              let full = CGImageSourceCreateImageAtIndex(source, 0, sourceOptions) else {
+            throw failure("无法解码此图片格式")
+        }
+        let region = rect.integral.intersection(CGRect(x: 0, y: 0, width: full.width, height: full.height))
+        guard !region.isEmpty, let cropped = full.cropping(to: region) else {
+            throw failure("页面区域越界")
+        }
+        let sample = max(1, sampleSize)
+        if sample == 1 { return UIImage(cgImage: cropped) }
+        let targetWidth = max(1, Int(ceil(Double(cropped.width) / Double(sample))))
+        let targetHeight = max(1, Int(ceil(Double(cropped.height) / Double(sample))))
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        guard let context = CGContext(data: nil, width: targetWidth, height: targetHeight,
+                                      bitsPerComponent: 8, bytesPerRow: targetWidth * 4,
+                                      space: colorSpace, bitmapInfo: bitmapInfo) else {
+            return UIImage(cgImage: cropped)
+        }
+        context.interpolationQuality = .high
+        context.draw(cropped, in: CGRect(x: 0, y: 0, width: targetWidth, height: targetHeight))
+        guard let scaled = context.makeImage() else { return UIImage(cgImage: cropped) }
+        return UIImage(cgImage: scaled)
+    }
+
+    static func splitPage(_ image: UIImage, segment: Int) -> UIImage {
+        guard (segment == 1 || segment == 2), let cgImage = image.cgImage, cgImage.width >= 2 else { return image }
+        let halfWidth = cgImage.width / 2
+        let x = segment == 1 ? 0 : (cgImage.width - halfWidth)
+        guard let half = cgImage.cropping(to: CGRect(x: x, y: 0, width: halfWidth, height: cgImage.height)) else {
+            return image
+        }
+        return UIImage(cgImage: half, scale: image.scale, orientation: image.imageOrientation)
+    }
+
+    static func samplePixels(_ image: UIImage, sampleSize: Int) -> (width: Int, height: Int, pixels: [Int32])? {
+        guard let cgImage = image.cgImage, cgImage.width > 0, cgImage.height > 0 else { return nil }
+        let sample = max(1, sampleSize)
+        let width = max(1, cgImage.width / sample)
+        let height = max(1, cgImage.height / sample)
+        var pixels = [Int32](repeating: 0, count: width * height)
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        let drawn = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let base = buffer.baseAddress,
+                  let context = CGContext(data: base, width: width, height: height,
+                                          bitsPerComponent: 8, bytesPerRow: width * 4,
+                                          space: colorSpace, bitmapInfo: bitmapInfo) else { return false }
+            context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        return drawn ? (width, height, pixels) : nil
+    }
+
+    static func crop(_ image: UIImage, rect: CGRect) -> UIImage {
+        guard let cgImage = image.cgImage else { return image }
+        let bounds = rect.integral.intersection(CGRect(x: 0, y: 0, width: cgImage.width, height: cgImage.height))
+        guard !bounds.isEmpty, let cropped = cgImage.cropping(to: bounds) else { return image }
+        return UIImage(cgImage: cropped, scale: image.scale, orientation: image.imageOrientation)
+    }
+
+    private static func validatedData(directory: URL, relativePath: String, sha256: String, byteSize: Int64) throws -> Data {
         guard sha256.count == 64, sha256.allSatisfy({ "0123456789abcdef".contains($0) }),
               relativePath == "\(sha256).img", byteSize > 0, byteSize <= 64 * 1024 * 1024 else {
             throw failure("图片记录无效")
@@ -19,15 +119,7 @@ enum SourceImageFile {
               SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() == sha256 else {
             throw failure("图片文件校验失败")
         }
-        let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
-        guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions),
-              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceShouldCacheImmediately: true,
-                kCGImageSourceThumbnailMaxPixelSize: 4096,
-              ] as CFDictionary) else { throw failure("无法解码此图片格式") }
-        return UIImage(cgImage: image)
+        return data
     }
 
     private static func failure(_ message: String) -> NSError {

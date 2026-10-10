@@ -10,7 +10,13 @@ data class SourceHostConfig(
     val jars: List<SourceHostJar> = emptyList(),
     val imageDirectory: String? = null,
     val preferenceDirectory: String? = null,
+    /** Non-Tachiyomi plugins (kototoro / kotatsu / UMA parser JARs); served by a [SourceHostRuntimePlatform]. */
+    val plugins: List<SourceHostPlugin> = emptyList(),
 )
 
 @Serializable
 data class SourceHostJar(val path: String, val identity: MihonJarIdentity)
+
+/** A plugin JAR another ecosystem host loads; [sha256] is verified before loading when present. */
+@Serializable
+data class SourceHostPlugin(val path: String, val id: String, val sha256: String? = null, val versionCode: Long = 0)

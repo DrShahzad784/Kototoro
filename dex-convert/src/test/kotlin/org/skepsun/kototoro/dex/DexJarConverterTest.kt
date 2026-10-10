@@ -10,6 +10,7 @@ import org.junit.jupiter.api.io.TempDir
 import java.net.URLClassLoader
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.concurrent.TimeUnit
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
@@ -90,6 +91,29 @@ class DexJarConverterTest {
             assertTrue(zip.getEntry("META-INF/services/fixture.Service") != null)
             assertTrue(zip.getEntry("res/layout/unused.xml") == null, "Android resources are not carried over")
         }
+    }
+
+    @Test
+    fun `conversion works when the JVM has no zip filesystem module`() {
+        val tools = AndroidTools.find()
+        assumeTrue(tools != null, "Android SDK with d8 is required")
+        val dex = tools!!.dex(tools.compileJar(root.resolve("compile"), greeter), root.resolve("dex"))
+        val plugin = zip(root.resolve("plugin.jar"), mapOf("classes.dex" to Files.readAllBytes(dex)))
+        val target = root.resolve("converted.jar")
+        val log = root.resolve("conversion.log")
+        val process = ProcessBuilder(
+            Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+            "--limit-modules", "java.base", "-cp", System.getProperty("kototoro.dex.runtime.classpath"),
+            "org.skepsun.kototoro.dex.DexConvertCliKt", plugin.toString(), target.toString(),
+        ).redirectErrorStream(true).redirectOutput(log.toFile()).start()
+        try {
+            assertTrue(process.waitFor(60, TimeUnit.SECONDS), "Conversion timed out")
+            assertEquals(0, process.exitValue(), Files.readString(log))
+            URLClassLoader(arrayOf(target.toUri().toURL()), null).use { loader ->
+                assertEquals("HELLO IOS", loader.loadClass("fixture.Greeter").getMethod("greet", String::class.java)
+                    .invoke(null, "ios"))
+            }
+        } finally { if (process.isAlive) process.destroyForcibly() }
     }
 
     @Test

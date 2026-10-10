@@ -1,0 +1,235 @@
+@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+package org.skepsun.kototoro.ios
+
+import kotlinx.coroutines.runBlocking
+import org.skepsun.kototoro.core.source.*
+import platform.Foundation.*
+import kotlin.test.*
+
+class IosProductTest {
+    private val source = SourceRef("MIHON_9007199254740993", "zh", "MANGA")
+    private val chapter = SourceChapter(Long.MAX_VALUE, "第一话", 1f, 1, "/chapter/1", null, 1, "中文", source,
+        sourceData = """{"chapterToken":"opaque"}""")
+    private val otherBranch = chapter.copy(id = 222, branch = "英文")
+    private val content = SourceContent(Long.MIN_VALUE, "漫画", emptySet(), "/manga", "https://fixture.invalid/manga",
+        0f, null, null, emptySet(), null, emptySet(), source, chapters = listOf(chapter, otherBranch),
+        sourceData = """{"contentToken":"opaque"}""")
+    private val page = SourcePage(9007199254740993, "mihon://image", null, source,
+        headers = mapOf("Referer" to "opaque"),
+        requestContext = SourcePageRequestContext(2, "https://fixture.invalid/c", "https://fixture.invalid/i#key"))
+
+    @Test
+    fun recordsKeepIdentityAndPositionAcrossReopening() = runBlocking {
+        withDatabase { path ->
+            val item = IosSourceContent(content)
+            val first = IosLibrary(path)
+            try {
+                first.setFavourite(item, true)
+                first.recordPosition(item, IosSourceChapter(chapter), 2, 4, 12f)
+                first.toggleBookmark(item, IosSourceChapter(chapter), IosSourcePage(page), 2, 4, 12f)
+                first.addCategory("待读")
+                val category = first.categories().first { it.title == "待读" }
+                first.setCategories(item, listOf(category.id))
+            } finally { first.close() }
+            val second = IosLibrary(path)
+            try {
+                // Source metadata comes from the installed catalog, as on the desktop/Android hosts.
+                second.updateSources(listOf(IosSource(source.name, "漫画源", source.locale, source.contentType, "extension")))
+                val saved = second.favourites().single().content
+                assertEquals(content, saved.value)
+                assertEquals(IosReadingPosition(chapter.id.toString(), 2, 12f, 0.75f), second.position(saved))
+                assertEquals(2, second.bookmarks(saved).single().index)
+                assertEquals(content.id.toString(), second.history().single().content.id)
+                assertFailsWith<IllegalArgumentException> {
+                    second.saveDetails(IosSourceContent(content.copy(source = source.copy(name = "OTHER"))))
+                }
+                second.removeBookmark(saved, second.bookmarks(saved).single())
+                second.setFavourite(saved, false)
+                second.removeHistory(saved)
+                assertTrue(second.favourites().isEmpty())
+                assertTrue(second.history().isEmpty())
+                assertTrue(second.bookmarks(saved).isEmpty())
+            } finally { second.close() }
+        }
+    }
+
+    @Test
+    fun updateChecksUseReadBranchAndClearUnreadCounter() = runBlocking {
+        withDatabase { path ->
+            val library = IosLibrary(path)
+            var fresh = content
+            val runtime = IosSources(object : IosSourceTransport {
+                override fun exchange(requestJson: String): String {
+                    val request = SourceProtocolJson.decodeFromString<SourceRequest>(requestJson)
+                    assertTrue(request.call is SourceCall.Details)
+                    assertEquals(SourceDetailsFetchMode.FORCE_REFRESH, (request.call as SourceCall.Details).fetchMode)
+                    return SourceProtocolJson.encodeToString(SourceResponse(1, request.requestId, SourceResult.Details(fresh)))
+                }
+                override fun close() {}
+            })
+            try {
+                val item = IosSourceContent(content)
+                library.setFavourite(item, true)
+                library.recordPosition(item, IosSourceChapter(chapter), 0, 4, 0f)
+                assertEquals(0, library.checkUpdates(runtime).newChapters)
+                fresh = content.copy(chapters = listOf(chapter, otherBranch, chapter.copy(id = 333, number = 2f),
+                    otherBranch.copy(id = 444, number = 2f)))
+                assertEquals(1, library.checkUpdates(runtime).newChapters)
+                assertEquals(1, library.updates().single().newChapters)
+                library.markUpdateRead(item)
+                assertTrue(library.updates().isEmpty())
+            } finally { runtime.close(); library.close() }
+        }
+    }
+
+    @Test
+    fun readerCoreOwnsSpreadGeometryAndContinuousProgress() {
+        val reader = IosReader()
+        reader.configure(4, 800, 600, 1, true, true, 0)
+        assertEquals(listOf(0, 1, 3), reader.slots().map { it.anchor })
+        val pair = reader.slots()[1].placements
+        assertTrue(pair[0].x > pair[1].x)
+        reader.setImageSize(1, 1600, 600)
+        assertEquals(1, reader.slots()[1].placements.size)
+        reader.configure(2, 800, 600, 1, false, false, 0, true)
+        assertEquals(3, reader.slots().size)
+        assertEquals(listOf(0, 2, 1), reader.slots().map { it.placements.single().segment })
+        assertEquals(listOf(0, 1, 1), reader.slots().map { it.anchor })
+        reader.configure(4, 800, 600, 3, false, false, 0)
+        reader.setImageSize(0, 800, 1200)
+        assertEquals(IosReaderProgress(0, 500f), reader.progress(0f, 500f))
+        assertEquals(500f, reader.scrollOrigin(0, 500f))
+        assertEquals(1200f, reader.scrollOrigin(1, 0f))
+        assertTrue(reader.autoScrollDistance(1f, 16) > reader.autoScrollDistance(0.1f, 16))
+        assertEquals(1, reader.progress(0f, 1300f).index)
+        assertEquals(0f, reader.clampPan(100f, 0f, 800f, 800f, 1f))
+        val tallSize = reader.decodeSize(800, 12000)
+        assertTrue(tallSize.height > 4096 && tallSize.width.toLong() * tallSize.height <= IosReader.MAXIMUM_PIXELS)
+        assertTrue(reader.isTiled(800, 12000))
+        val tiles = reader.visibleTiles(0f, 0f, 0, 2000, 12000, 1f)
+        assertTrue(tiles.isNotEmpty() && tiles.all { it.decodeHeight < 12000 })
+        val pixels = IntArray(400 * 400) { index ->
+            val x = index % 400
+            val y = index / 400
+            if (x in 50 until 350 && y in 40 until 360) 0xFF112233.toInt() else -1
+        }
+        assertEquals(IosReaderRect(50, 40, 300, 320), reader.contentBounds(400, 400, 1, 400, 400, pixels))
+    }
+
+    @Test
+    fun offlinePageArchiveKeepsHeadersContextAndExactIds() {
+        val codec = IosPageArchive()
+        assertEquals(page, codec.decode(codec.encode(listOf(IosSourcePage(page)))).single().value)
+    }
+
+    @Test
+    fun repositoryDecoderPersistsAndRejectsIdentityChange() = runBlocking {
+        withDatabase { path ->
+            val library = IosLibrary(path)
+            try {
+                val repositories = IosRepositories(library)
+                val bytes = """[{"name":"Mihon: 漫画","pkg":"test.extension","version":"1.6.1","code":7,"apk":"test.apk","sources":[{"id":"9007199254740993","name":"漫画","lang":"zh"}]}]""".encodeToByteArray()
+                val catalog = repositories.decode(bytes, false, "https://fixture.invalid/repo/index.min.json", "MIHON")
+                assertEquals("9007199254740993", catalog.rows.single().sources.single().id.toString())
+                assertEquals("apk/test.apk", catalog.extensions.single().url)
+                repositories.save(catalog, "a".repeat(64))
+                repositories.save(catalog, "a".repeat(64))
+                assertEquals(1, repositories.saved().size)
+                assertFailsWith<IllegalArgumentException> { repositories.save(catalog, "b".repeat(64)) }
+                assertEquals("a".repeat(64), repositories.saved().single().fingerprint)
+
+                val repoJson = """{"meta":{"name":"Keiyoushi","shortName":"KEI","website":"https://keiyoushi.github.io","signingKeyFingerprint":"${"c".repeat(64)}"},"index_v2":"index.min.json"}""".encodeToByteArray()
+                val headerCatalog = repositories.decode(repoJson, false, "https://fixture.invalid/repo/repo.json", "MIHON")
+                assertEquals("index.min.json", headerCatalog.externalList)
+                val fullCatalog = repositories.external(headerCatalog, bytes, false, "https://fixture.invalid/repo/index.min.json")
+                assertEquals(1, fullCatalog.extensions.size)
+                assertEquals("https://fixture.invalid/repo/index.min.json", fullCatalog.resourceBaseUrl)
+            } finally { library.close() }
+        }
+    }
+
+    @Test
+    fun pagingPropagatesTransientFailureAndResumesNextPage() = runBlocking {
+        var failSecondPage = true
+        val secondContent = content.copy(id = 42L, title = "第二页漫画", url = "/manga-2")
+        val runtime = IosSources(object : IosSourceTransport {
+            override fun exchange(requestJson: String): String {
+                val request = SourceProtocolJson.decodeFromString<SourceRequest>(requestJson)
+                val result: SourceResult = when (val call = request.call) {
+                    is SourceCall.Describe -> SourceResult.Descriptor(
+                        SourceDescriptor(
+                            source = source,
+                            sortOrders = setOf("ALPHABETICAL"),
+                            defaultSortOrder = "ALPHABETICAL",
+                            filterCapabilities = SourceFilterCapabilities(
+                                isMultipleTagsSupported = false,
+                                isTagsExclusionSupported = false,
+                                isSearchSupported = true,
+                                isSearchWithFiltersSupported = false,
+                                isYearSupported = false,
+                                isYearRangeSupported = false,
+                                isOriginalLocaleSupported = false,
+                                isAuthorSearchSupported = false,
+                            ),
+                            pagingMode = SourcePagingMode.PAGE_INDEX,
+                        ),
+                    )
+                    is SourceCall.ListContent -> when (call.offset) {
+                        0 -> SourceResult.ListContent(listOf(content))
+                        1 -> if (failSecondPage) {
+                            throw IllegalStateException("HTTP 503")
+                        } else {
+                            SourceResult.ListContent(listOf(secondContent))
+                        }
+                        else -> SourceResult.ListContent(emptyList())
+                    }
+                    else -> error("Unexpected call: $call")
+                }
+                return SourceProtocolJson.encodeToString(SourceResponse(1, request.requestId, result))
+            }
+            override fun close() {}
+        })
+        try {
+            val firstPage = runtime.page(source.name, page = 0, loadedCount = 0, query = null, tag = null)
+            assertEquals(listOf(content.id.toString()), firstPage.map { it.id })
+            assertFailsWith<Exception> {
+                runtime.page(source.name, page = 1, loadedCount = firstPage.size, query = null, tag = null)
+            }
+            failSecondPage = false
+            val secondPage = runtime.page(source.name, page = 1, loadedCount = firstPage.size, query = null, tag = null)
+            assertEquals(listOf(secondContent.id.toString()), secondPage.map { it.id })
+        } finally {
+            runtime.close()
+        }
+    }
+
+    @Test
+    fun spreadProgressAndNovelBookmarksPersist() = runBlocking {
+        withDatabase { path ->
+            val library = IosLibrary(path)
+            try {
+                val mangaItem = IosSourceContent(content)
+                library.recordPosition(mangaItem, IosSourceChapter(chapter), index = 2, count = 4, lastVisible = 3, scroll = 0f)
+                assertEquals(IosReadingPosition(chapter.id.toString(), 2, 0f, 1.0f), library.position(mangaItem))
+
+                val novelSource = SourceRef("TSUNDOKU_NOVEL", "zh", "NOVEL")
+                val novelChapter = chapter.copy(source = novelSource)
+                val novelContent = content.copy(id = 77L, source = novelSource, chapters = listOf(novelChapter))
+                val novelItem = IosSourceContent(novelContent)
+                library.toggleNovelBookmark(novelItem, IosSourceChapter(novelChapter), index = 1, count = 3, preview = "第二段正文内容")
+                val bookmark = library.bookmarks(novelItem).single()
+                assertEquals(1, bookmark.index)
+                assertEquals("第二段正文内容", bookmark.preview)
+                library.toggleNovelBookmark(novelItem, IosSourceChapter(novelChapter), index = 1, count = 3, preview = "第二段正文内容")
+                assertTrue(library.bookmarks(novelItem).isEmpty())
+            } finally { library.close() }
+        }
+    }
+
+    private suspend fun withDatabase(block: suspend (String) -> Unit) {
+        val dir = NSTemporaryDirectory() + NSUUID().UUIDString
+        val files = NSFileManager.defaultManager
+        check(files.createDirectoryAtPath(dir, true, null, null))
+        try { block("$dir/library.db") } finally { files.removeItemAtPath(dir, null) }
+    }
+}

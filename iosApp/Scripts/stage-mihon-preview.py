@@ -1,9 +1,21 @@
 #!/usr/bin/env python3
-"""Stage a separate real-APK simulator profile using the pinned Mobile APIs and the shared converter."""
+"""Stage the real-extension simulator profile using the pinned Mobile APIs and the shared converter.
+
+Artifacts come from repositories listed on the Kototoro repo hub, pinned by SHA-256 and converted on this Mac with
+:dex-convert (devices receive the converted JARs; on-device conversion is a later step):
+
+  * Mihon     再漫画 (keiyoushi)            -> MIHON_<id>, manga
+  * Tsundoku  AllNovelFull (NovelSourcery)  -> TSUNDOKU_<id>, novels
+  * Aniyomi   AnimeGG, Anime1.me (yuzono)   -> ANIYOMI_<id>, video
+  * JAR       kototoro-parsers plugin 137   -> parser enum names, served by :parser-host
+
+Everything is written under ignored iosApp/build; nothing enters the default distribution.
+"""
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import zipfile
@@ -13,8 +25,41 @@ APP = Path(__file__).resolve().parent.parent
 ROOT = APP.parent
 SOURCE = APP / "build/jvm"
 TARGET = APP / "build/jvm-real-api"
-APK_URL = "https://github.com/keiyoushi/extensions/releases/download/24bc6c2/tachiyomi-zh.zaimanhua-v1.6.0.apk"
-APK_SHA = "f6605e36a7d1453b60814bb6f7340a8f724183b11ee3f95e02d9542753ba81fe"
+WORK = APP / "build/jvm-work"
+
+ARTIFACTS = [
+    ("zaimanhua.apk",
+     "https://github.com/keiyoushi/extensions/releases/download/24bc6c2/tachiyomi-zh.zaimanhua-v1.6.0.apk",
+     "f6605e36a7d1453b60814bb6f7340a8f724183b11ee3f95e02d9542753ba81fe"),
+    ("tachiyomi-en.allnovelfull-v1.6.19.apk",
+     "https://github.com/NovelSourcery/extensions/releases/download/ba92ea4/tachiyomi-en.allnovelfull-v1.6.19.apk",
+     "3f1d1e774069974e85007e09c487f0d9c5cc3928126d47c660222ea7d82c1c8b"),
+    ("aniyomi-en.animegg-v14.2.apk",
+     "https://raw.githubusercontent.com/yuzono/anime-repo/repo/apk/aniyomi-en.animegg-v14.2.apk",
+     "b177df7d0cffec82df81ee56b568393103d0bf28688c370657a8663f8c8c39ad"),
+    ("aniyomi-zh.anime1-v14.4.apk",
+     "https://raw.githubusercontent.com/yuzono/anime-repo/repo/apk/aniyomi-zh.anime1-v14.4.apk",
+     "fa5bda416aa643af5ec98ddbc4273b4d4b54f62f443b6aa8de79cc1cc131b50c"),
+    ("kototoro-parsers-plugin-137.jar",
+     "https://raw.githubusercontent.com/skepsun/kototoro-parsers/repo/apk/plugin.jar",
+     "0826c8c91d671fa2a2fc961e274ce2542f2a124c8b2944b690cb3b336b4b0422"),
+]
+PLUGIN_IDS = {"kototoro-parsers-plugin-137.jar": "kototoro-parsers"}
+
+# Our Kotlin runtime wins over the Mobile API copies (as before); for every other artifact both provide, the Mobile
+# API's copy is the single one on the classpath so OkHttp/okio/jsoup are shared by all ecosystems.
+OURS = ("kotlin-stdlib", "kotlinx-coroutines-core-jvm", "kotlinx-serialization-core-jvm",
+        "kotlinx-serialization-json-jvm")
+MOBILE_CORE = ("000-", "AndroidCompat", "server-", "android-jar")
+
+
+def base_name(jar):
+    """Artifact name without version: okhttp-jvm-5.4.0.jar -> okhttp-jvm."""
+    return re.sub(r"-\d[\w.\-]*$", "", jar.stem)
+
+
+def sha256(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def main():
@@ -25,57 +70,82 @@ def main():
     spec.loader.exec_module(builder)
     compatibility = APP / "build/mihon-ios-api"
     compatibility.mkdir(parents=True, exist_ok=True)
-    TARGET.mkdir(parents=True, exist_ok=True)
+    WORK.mkdir(parents=True, exist_ok=True)
+    if TARGET.exists():
+        shutil.rmtree(TARGET)
+    TARGET.mkdir(parents=True)
     with zipfile.ZipFile(builder.download("runtime.ipa")) as archive:
         for name in archive.namelist():
             if "/tachiaz-compat/" in name and name.endswith(".jar"):
                 (compatibility / name.rsplit("/", 1)[1]).write_bytes(archive.read(name))
         (TARGET / "boot-shims.jar").write_bytes(archive.read("Payload/Aidoku.app/tachiaz-mobile-shims.jar"))
-    apk = APP / "build/jvm-work/zaimanhua.apk"
-    if not apk.exists():
-        builder.run(["curl", "--fail", "--location", "--retry", "3", "--output", apk, APK_URL])
-    if hashlib.sha256(apk.read_bytes()).hexdigest() != APK_SHA:
-        raise RuntimeError("Real extension APK SHA-256 mismatch")
+
     sources = TARGET / "sources"
-    sources.mkdir(exist_ok=True)
-    jar = sources / "zaimanhua-converted.jar"
+    sources.mkdir()
+    pairs = []
+    for name, url, expected in ARTIFACTS:
+        local = WORK / name
+        if not local.exists():
+            builder.run(["curl", "--fail", "--location", "--retry", "3", "--output", local, url])
+        if sha256(local) != expected:
+            raise RuntimeError(f"SHA-256 mismatch for {name}")
+        pairs += [str(local), str(sources / (Path(name).stem + "-converted.jar"))]
+
     env = dict(os.environ)
     env["JAVA_HOME"] = os.environ.get("KOTOTORO_JVM_BOOT_JDK") or subprocess.check_output(
         ["/usr/libexec/java_home", "-v", "24"], text=True).strip()
-    builder.run([ROOT / "gradlew", ":source-host:installDist", ":mihon-ios-compat:stagePreview", ":dex-convert:convertApk",
-                 "-PwithMihonIosCompat", "-PmihonIosCompatibilityDirectory=" + str(compatibility),
-                 "-PextensionApk=" + str(apk), "-PextensionJar=" + str(jar), "--no-daemon"], cwd=ROOT, env=env)
+    output = subprocess.run(
+        [ROOT / "gradlew", ":mihon-ios-compat:stagePreview", ":dex-convert:convertApk", "--console=plain",
+         "-PwithMihonIosCompat", "-PmihonIosCompatibilityDirectory=" + str(compatibility),
+         "-PconvertPairs=" + "|".join(pairs), "--no-daemon"],
+        cwd=ROOT, env=env, check=True, text=True, stdout=subprocess.PIPE).stdout
+    converted = [json.loads(line.split(" ", 1)[1]) for line in output.splitlines() if line.startswith("CONVERTED ")]
+    if len(converted) != len(ARTIFACTS):
+        raise RuntimeError("Converter did not report every artifact:\n" + output)
+
     for name in ["java_bundle", "include"]:
         shutil.copytree(SOURCE / name, TARGET / name, dirs_exist_ok=True)
     shutil.copy2(SOURCE / "libkototoro-jvm.a", TARGET / "libkototoro-jvm.a")
     lib = TARGET / "lib"
-    lib.mkdir(exist_ok=True)
+    lib.mkdir()
     for index, name in enumerate(["000-tachiaz-mobile-compat-shims.jar", "AndroidCompat-1.0.jar", "server-1.0.jar",
                                   "android-jar-1.0.0.jar"]):
         shutil.copy2(compatibility / name, lib / (str(index).zfill(2) + "-" + name))
-    shutil.copy2(SOURCE / "ios-adapter/mihon-ios-compat.jar", lib / "05-mihon-ios-compat.jar")
-    for item in (ROOT / "source-host/build/install/source-host/lib").glob("*.jar"):
-        if item.name != "fixture-api.jar":
-            shutil.copy2(item, lib / ("10-" + item.name))
-    for item in compatibility.glob("*.jar"):
-        if not item.name.startswith(("000-", "AndroidCompat", "server-", "android-jar", "kotlin-stdlib",
-                                     "kotlinx-coroutines-core-jvm", "kotlinx-serialization-core-jvm",
-                                     "kotlinx-serialization-json-jvm")):
+    adapter = SOURCE / "ios-adapter"
+    shutil.copy2(adapter / "mihon-ios-compat.jar", lib / "05-mihon-ios-compat.jar")
+    mobile = {base_name(item): item for item in compatibility.glob("*.jar") if not item.name.startswith(MOBILE_CORE)}
+    for item in sorted((adapter / "deps").glob("*.jar")):
+        base = base_name(item)
+        if base in mobile and not base.startswith(OURS):
+            continue  # the Mobile API provides it
+        shutil.copy2(item, lib / ("10-" + item.name))
+    for base, item in mobile.items():
+        if not base.startswith(OURS):
             shutil.copy2(item, lib / ("20-" + item.name))
+
+    jars, plugins = [], []
+    for (name, _, _), info in zip(ARTIFACTS, converted):
+        relative = Path(info["output"]).name
+        if info["kind"] == "apk":
+            jars.append({"path": relative, "identity": {
+                "packageName": info["packageName"], "versionCode": info["versionCode"], "sha256": info["sha256"]}})
+        else:
+            plugins.append({"path": relative, "id": PLUGIN_IDS[name], "sha256": info["sha256"]})
     config = {
         "platformClass": "org.skepsun.kototoro.ios.compat.MihonIosPlatform",
-        "jars": [{"path": jar.name, "identity": {
-            "packageName": "eu.kanade.tachiyomi.extension.zh.zaimanhua", "versionCode": 106000,
-            "sha256": hashlib.sha256(jar.read_bytes()).hexdigest()}}],
+        "jars": jars, "plugins": plugins,
         "imageDirectory": "images", "preferenceDirectory": "prefs",
     }
-    (sources / "config.json").write_text(json.dumps(config))
-    (sources / "preview.json").write_text(json.dumps({"label": "再漫画 APK 兼容性验证"}, ensure_ascii=False))
+    (sources / "config.json").write_text(json.dumps(config, indent=2))
+    (sources / "preview.json").write_text(json.dumps({"label": "真实扩展兼容性验证（Mihon/Tsundoku/Aniyomi/JAR）"},
+                                                     ensure_ascii=False))
     # Inspectable digest inventory of the generated preview; not a production distribution manifest.
-    inventory = {str(item.relative_to(TARGET)): hashlib.sha256(item.read_bytes()).hexdigest()
+    inventory = {str(item.relative_to(TARGET)): sha256(item)
                  for item in TARGET.rglob("*") if item.is_file() and item.name != "inventory.json"}
     (TARGET / "inventory.json").write_text(json.dumps(inventory, indent=4))
-    print("Real APK simulator profile ready:", TARGET)
+    print("Real extension simulator profile ready:", TARGET)
+    for item in converted:
+        print("  ", item.get("packageName", item["kind"]), Path(item["output"]).name, item["classes"], "classes")
 
 
 if __name__ == "__main__":

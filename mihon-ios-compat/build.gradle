@@ -27,14 +27,25 @@ def apis = fileTree(directory) {
     include '*.jar'
     exclude '000-*', 'kotlin-stdlib*', 'kotlinx-coroutines*', 'kotlinx-serialization-core*', 'kotlinx-serialization-json*'
 }
+// The Aniyomi animesource ABI is not part of the Mobile API. Compile the same sources the Windows adapter ports
+// (they only use OkHttp/Rx/Injekt/jsoup types both APIs provide) instead of keeping a second copy.
+sourceSets.main.kotlin.srcDir(rootProject.file('mihon-desktop-compat/src/main/kotlin/eu'))
+
 dependencies {
     implementation project(':source-host')
     implementation project(':core-source')
+    // kototoro / kotatsu / UMA parser JARs share the Mobile API's OkHttp client and cookie store.
+    implementation project(':parser-host')
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:${libs.versions.coroutines.get()}"
     compileOnly apis
 }
 
-tasks.register('stagePreview', Copy) {
+tasks.register('stagePreview', Sync) {
     dependsOn tasks.named('jar')
-    from tasks.named('jar')
-    into rootProject.layout.projectDirectory.dir('iosApp/build/jvm/ios-adapter')
+    def target = rootProject.layout.projectDirectory.dir('iosApp/build/jvm/ios-adapter')
+    from(tasks.named('jar'))
+    // Runtime dependencies (source-host, parser-host, parser-api, ...); the staging script drops any artifact the
+    // Mobile API already provides so one copy of OkHttp/okio/jsoup serves every ecosystem.
+    from(configurations.runtimeClasspath) { into 'deps' }
+    into target
 }

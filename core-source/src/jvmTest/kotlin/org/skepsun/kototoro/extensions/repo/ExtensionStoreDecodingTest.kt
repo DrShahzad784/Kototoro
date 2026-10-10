@@ -64,4 +64,26 @@ class ExtensionStoreDecodingTest {
         assertEquals("", decodeExtensionStoreList(data.toByteArray(), false).extensions.single().resources.jarUrl)
         assertThrows(Exception::class.java) { decodeExtensionStoreList(data.replace("\"versionCode\":1", "\"versionCode\":\"bad\"").toByteArray(), false) }
     }
+
+    @Test
+    fun `gzipped protobuf index and repo json metadata wrapper decode cleanly`() {
+        val extension = ExtensionStoreIndex.Extension("源", "fixture.extension",
+            ExtensionStoreIndex.Resources("apk/plugin.apk", "icon/plugin.png"), "1.4", 42L, "1.4.29",
+            ExtensionStoreIndex.ContentWarning.SAFE, listOf(ExtensionStoreIndex.Source(123L, "源", "zh")))
+        val original = ExtensionStoreIndex("Keiyoushi", "KEI", "9add655a",
+            ExtensionStoreIndex.Contact("https://keiyoushi.github.io"),
+            ExtensionStoreIndex.ExtensionList(listOf(extension)))
+        val rawPb = ProtoBuf.encodeToByteArray(ExtensionStoreIndex.serializer(), original)
+        val gzippedPb = java.io.ByteArrayOutputStream().also { out ->
+            java.util.zip.GZIPOutputStream(out).use { it.write(rawPb) }
+        }.toByteArray()
+        assertEquals(original, decodeExtensionStoreIndex(gzippedPb, true))
+
+        val repoJson = """{"meta":{"name":"Keiyoushi","shortName":"KEI","website":"https://keiyoushi.github.io","signingKeyFingerprint":"b1f2a65ef1ebdec247aa3d1deef6d1ab2ee535208caadca327d9e4429bd5fb3e"},"index_v2":"index.min.json"}"""
+        val metaIndex = decodeExtensionStoreIndex(repoJson.toByteArray(), false)
+        assertEquals("Keiyoushi", metaIndex.name)
+        assertEquals("KEI", metaIndex.badgeLabel)
+        assertEquals("index.min.json", metaIndex.extensionListUrl)
+        assertEquals("https://keiyoushi.github.io", metaIndex.contact.website)
+    }
 }

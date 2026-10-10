@@ -5116,3 +5116,104 @@ Swift DTO 投影；C/JNI 只负责 VM 启动、Java global reference、线程附
   收藏/历史与阅读进度持久化；搜索/列表分页/用户 APK 导入仍待实现。
   WKWebView、完整 WebKit Cookie、JS/图形 native、真机与 S0/G0/G2/S3 仍按原计划验收。
   单个公开源的详情/图片成功不代表全量扩展兼容。
+
+## 93. iOS 原生苹果 CMS 影视源与系统播放器（2026-10-10）
+
+**调用链**：`SwiftUI → IosSources → RoutedSourceRuntime → MacCmsSourceRuntime（Kotlin/Native）→ Ktor Darwin`。
+`JSON_TVBOX_*` 源原生执行，其余源仍路由到 §91 的可选 JNI/JVM 会话；**默认构建（不含 JVM）即可使用**。
+
+- 新增 KMP 模块 `:source-tvbox`（commonMain，jvm + iosArm64 + iosSimulatorArm64，无 Android/JVM 专有 API）：
+  - `TvBoxImport`：TVBox 配置（注释/尾逗号/`xxxxxxxx**` Base64 包装）、`urls` 多仓（最多 3 层、去重）、
+    MacCMS API 地址与"看起来是 CMS 响应"的地址；只导入 type 0/1 站点，type 3/4 与 `csp_` 计入跳过数。
+    AES 加密配置明确报不支持。
+  - 存储与 Android 完全一致：写入共享 `json_sources`（type=TVBOX），配置为
+    `schemaVersion/importType/site/root/meta`，ID 为 `JSON_TVBOX_` + 指纹 Java 字符串哈希的无符号十六进制。
+  - `MacCmsParser` 移植 Android `TVBoxRepository` 的 CMS 分支：JSON 载荷遍历、XML（`MiniXml`，不展开 DOCTYPE/实体）、
+    `vod_play_from/vod_play_url` 线路解析、可播放地址判定、列表/详情 URL 变体、header 规则与 Referer。
+    `tvbox://item|chapter` URL、item/chapter/page 63 位 ID 与 Android 同一公式，便于后续历史/同步互通。
+  - 与 Android 唯一的有意差异：章节 `sourceData` 附带 `{"line": 线路名}`，供 iOS 按线路分组；ID/标题/branch 不变。
+  - `MacCmsSourceRuntime : SourceRuntime`：PAGE_INDEX 分页、分类标签 `cms_type:<id>`、检测结果与条目缓存、
+    `NEWEST` 保留站点原始顺序（默认仍为 Android 的 ALPHABETICAL）。爬虫站点返回 SourceUnavailable。
+- `ios-shared`：`IosHttp`（Ktor 3.5.0 Darwin 引擎，版本复用目录既有 Ktor）、`IosVideoSources`（导入/列出/删除，
+  保留已有 enabled/created/pinned）、`IosSources(transport?, videoSources?)` 路由；`catalog()` 中扩展运行时失败
+  不会隐藏原生源；`page(...)` 按源分页模式换算 offset；投影新增 coverUrl/summary/line/页地址与请求头。
+- SwiftUI（部署目标提升到 **iOS 26**，直接使用系统液态玻璃：`.glass`/`.glassProminent` 按钮、`glassEffect`、
+  `GlassEffectContainer`、TabView `tabBarMinimizeBehavior`）：浏览页影视/扩展分区与导入表单、源内 2:3 海报网格
+  + 分类胶囊 + `.searchable` + 无限滚动；详情页按线路分段选择、剧集按钮网格；`AVPlayerViewController`
+  播放（原生控件/AirPlay/画中画），`AVURLAssetHTTPHeaderFieldsKey` 传站点 headers，播完同线路自动下一集。
+  `Info.plist` 允许任意 HTTP（用户 CMS 与媒体普遍为 http）并开启后台音频（画中画）。
+  漫画详情/阅读沿用原流程；扩展封面仍由源客户端下载，原生源用 AsyncImage。
+
+**验证**
+
+- `:source-tvbox:jvmTest` 11 项通过（JSON/XML/搜索/分类/线路/ID 公式/导入/多仓/Base64/URL 解析与编码）；
+  `:source-tvbox:compileCommonMainKotlinMetadata` 通过。
+- `:ios-shared:iosSimulatorArm64Test` 6 项通过：新增真实 Room 导入 → 关闭重开 → 路由运行时列表/详情/线路/播放地址
+  → 删除；Android 导入的爬虫站点留在表中但不提供；仅含爬虫站点的配置给出原因。
+- XCTest（默认构建，无 JVM）：`VideoSourceTests` 对本机 `iosApp/Scripts/serve-cms-fixture.py`（ffmpeg 生成的 HLS）
+  完成 UI 导入 → 网格/服务端分类筛选 → 详情/线路选择器 → 播放进度推进 → 下一集且不跨线路 → 重启后源仍在；
+  分类持久化与图片文件回归同时通过，JVM 预览用例按设计跳过。截图已实际检查（`iosApp/build/reports/video`）。
+- 未运行 `:app:compileDebugKotlin`：本轮未修改 Android 源码，只在版本目录新增 `ktor-client-darwin` 条目。
+
+**真实仓库验收（同日补充）**：使用 [Kototoro 仓库中心](https://skepsun.github.io/kototoro-repo-hub/) 的 TVBOX 条目
+（28 个 CMS 接口 + 1 个多仓配置）。可选在线探测 `MacCmsOnlineProbeTest`
+（`-PtvboxOnlineList=<文件>`，可选 `-PtvboxProxy=host:port`，报告写入 `source-tvbox/build/reports/tvbox-online.txt`）
+逐站执行导入 → 分类 → 第 1/2 页 → 分类筛选 → 搜索 → 详情 → 播放地址 → 实际 GET 校验 `#EXTM3U`。
+- 三轮（直连 ×2、代理 ×1）中 27/28 个 CMS 接口至少一轮全链路通过（JSON 与 XML/`seaxml` 都有）；失败均为网络层：
+  直连超时/RST、代理出口 403（地区限制），sdzyapi 直连与代理均不可达。站点可用性随网络环境变化。
+- 真实问题与修复：多仓中的中文域名（`饭太硬.net`、`肥猫.net`）需要 IDN → 新增通用 Punycode（RFC 3492，
+  与 `java.net.IDN` 对照测试）；JPEG 伪装 + `xxxxxxxx**` Base64 配置在 Kotlin `Base64.Mime` 下解码失败 →
+  改为过滤到字母表后宽松解码。修复后该多仓可完整读取：293 个站点全部为 type 3/4 爬虫、0 个 CMS，
+  iOS 现提示"N 个站点都需要爬虫运行时"而不是首个子仓错误。另：JDK HttpClient 对 http:// 自动发 `Upgrade: h2c`
+  会让部分 TVBox 主机返回 HTML，探测客户端已固定 HTTP/1.1（URLSession/OkHttp 不发此头，不影响应用）。
+- iOS 模拟器 `VideoSourceTests.testRealAppleCmsSitePlaysOnSimulator`（`TEST_RUNNER_KOTOTORO_REAL_CMS=<接口>`）：
+  光速（XML）、暴风、量子（JSON）三站 UI 导入 → 真实海报网格 → 详情 24 集 → AVPlayer 实际播放均通过，
+  截图已检查（`iosApp/build/reports/real-cms`）。播放器标题与详情一致去掉线路前缀。
+
+**边界**：未接入解析（`parses`/嗅探）、直播（`lives`）、弹幕、播放进度/历史持久化、
+type 3/4 爬虫与加密配置。Android `TVBoxRepository` 尚未改为消费 `:source-tvbox`（两份实现规则一致，后续可收敛）。
+
+## 94. iOS：Aniyomi / Tsundoku / JAR 解析器插件接入嵌入式 JVM（2026-10-10）
+
+**调用链**：与 §91 相同的 `SwiftUI → IosSources → JNI → SourceHostSession`，会话内改为与桌面一致的
+`RoutedSourceRuntime`：`MihonSourceRuntime`（Mihon 漫画 + Tsundoku 小说）→ `AniyomiSourceRuntime`（视频）→
+平台提供的额外路由（parser-host 的 kototoro / kotatsu / UMA JAR）。苹果 CMS 仍在 Kotlin/Native 原生路由（§93）。
+
+- **source-host**：`SourceHostConfig.plugins`（path/id/sha256，可选字段，旧配置兼容）；新 SPI
+  `SourceHostRuntimePlatform.openRuntimes(plugins, images, preferences)` 返回 `SourceHostRuntimes`（路由 + 关闭），
+  source-host 不依赖 parser-host。配置了插件但平台不支持时明确拒绝。会话改为**并发 exchange**：关闭先拒绝新请求、
+  等待进行中的请求，再按 插件运行时 → registry → 平台 → 偏好 顺序释放；Mihon/Aniyomi 运行时内部按源串行的语义不变。
+  开发诊断 `-Dkototoro.source.diagnostics=stderr` 输出宿主侧异常栈（协议仍不携带原因，默认关闭）。
+- **mihon-ios-compat**：直接编译 `mihon-desktop-compat` 的 Aniyomi animesource ABI 源码（只依赖两套 API 都有的
+  OkHttp/Rx/Injekt/jsoup，不复制第二份）；`MihonIosPlatform` 实现 SPI，`IosParserPlatform` 与 Mihon 扩展共用
+  Mobile API 的 `NetworkHelper.client`（Cookie/清除共享）；位图重绘与 JS 尚未提供，需要的解析器按基础错误失败。
+- **dex-convert CLI**：一次接受多组 `<输入> <输出>`（`-PconvertPairs=a|b|c|d`），自动区分 APK 扩展与纯 DEX 插件 JAR，
+  每组输出 `CONVERTED {json}`（包名/versionCode/sha256/类数）。
+- **装配脚本** `stage-mihon-preview.py`：从仓库中心列出的仓库下载并按 SHA-256 固定 5 个样本——再漫画（Mihon）、
+  AllNovelFull 1.6.19（Tsundoku，NovelSourcery release）、AnimeGG 14.2 / Anime1.me 14.4（Aniyomi，yuzono）、
+  kototoro-parsers 插件 137（纯 DEX，`repo/apk/plugin.jar`）；一次 Gradle 调用完成转换，生成 jars + plugins 配置。
+  classpath 去重：Kotlin/coroutines/serialization 用本项目版本，其余重叠构件（OkHttp/okio/jsoup…）只保留 Mobile API
+  的一份；parser-api、parser-host、rhino、org.json、tsuki-runtime 由适配器补齐。`probe-jvm-preview.py` 在 Mac JDK 24
+  上用同一 classpath/配置通过 JSONL serve 做真实网络探测（可经 `KOTOTORO_PROBE_JVM_OPTIONS` 传代理）。
+- **iOS 投影/界面**：`IosSource.ecosystem/mediaKind/isAdult`；`IosSources.chapterText`（HTML + 插图及其请求头）。
+  浏览页按生态分区（Mihon / Tsundoku / Aniyomi / 解析器插件），支持搜索，成人内容源默认隐藏（显示菜单开关）。
+  新增原生 `NovelReaderView`：HTML → 段落/插图块（无 WebView），字号/行距可调，插图带站点请求头加载并降采样，
+  同源前后章。播放器保留一集的全部流（Aniyomi 多清晰度/hoster），菜单切换并续播，加载失败自动尝试下一路。
+  长集名每集一行，短集名用每行 4 个的分块网格（千集级剧集保持懒加载）。JVM 封面最多 2 个并发，视图消失后的排队请求
+  不进入 Kotlin，避免同一源的详情排在整页封面之后。Swift 传输层只在打开/关闭时加锁，关闭等待进行中的 JNI 调用。
+
+**验证**
+
+- JVM：source-host 92 项（新增同一会话路由漫画/动漫/插件、插件先于平台关闭、无 SPI 拒绝插件、并发请求与关闭等待）；
+  dex-convert 15（2 跳过）、parser-host 23（2 跳过）通过；ios-shared Native 7 项通过。
+- Mac JVM（Mobile API classpath）真实网络：再漫画 列表10→392章→图片；AllNovelFull 列表20→2166章→正文；AnimeGG
+  列表125→1165集→5路流；JAR：MANGADEX（36页图片）、BILINOVEL/ROYALROAD（正文）、COPYMANGA（需代理，WebP 图片）、
+  FANTUAN/NIUNIUZY/DMBUS/SENZHIWU（m3u8）。失败均定位到站点/网络：Anime1 CDN DNS 失败、BAOZIMH 与 WENKU8 需要浏览器验证
+  （待 WKWebView 桥）、AGEDM 默认线路需 VIP。
+- iOS 模拟器（arm64 Zero，真实网络）：`ExtensionEcosystemTests` 5 项——Tsundoku 正文、Aniyomi One Piece 实际播放、
+  JAR MANGADEX 图片、JAR BILINOVEL 正文、JAR FANTUAN 实际播放——全部通过，再漫画回归通过，截图已检查
+  （`iosApp/build/reports/eco2`）。修复过程中定位：插件相对路径未被 Swift 改写为包内绝对路径（INVALID_ARCHIVE）；
+  请求在 Swift 锁 + 会话锁下完全串行，导致详情排在整页封面之后超时。
+
+**边界**：APK/DEX 转换仍在 Mac 进行；没有用户安装/更新界面；WKWebView/Cloudflare、位图重绘、JS 引擎未接入；
+外挂字幕/音轨尚未接入 AVPlayer；Zero 解释执行下千集级详情耗时较长（AnimeGG 约 30–60 秒），需要真机基线。

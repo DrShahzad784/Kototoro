@@ -42,4 +42,59 @@ final class SourceImageFileTests: XCTestCase {
         XCTAssertThrowsError(try SourceImageFile.decode(directory: directory, relativePath: name,
                                                        sha256: hash, byteSize: Int64(png.count)))
     }
+
+    func testDimensionsRegionSplitAndPixelSampling() throws {
+        let files = FileManager.default
+        let directory = files.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try files.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? files.removeItem(at: directory) }
+
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: 240, height: 120), format: format)
+        let wideImage = renderer.image { context in
+            UIColor.white.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 240, height: 120))
+            UIColor.black.setFill()
+            context.fill(CGRect(x: 24, y: 12, width: 192, height: 96))
+        }
+        let png = try XCTUnwrap(wideImage.pngData())
+        let hash = SHA256.hash(data: png).map { String(format: "%02x", $0) }.joined()
+        let name = "\(hash).img"
+        try png.write(to: directory.appendingPathComponent(name))
+
+        let dims = try SourceImageFile.dimensions(directory: directory, relativePath: name,
+                                                  sha256: hash, byteSize: Int64(png.count))
+        XCTAssertEqual(dims.width, 240)
+        XCTAssertEqual(dims.height, 120)
+
+        let region = try SourceImageFile.decodeRegion(
+            directory: directory,
+            relativePath: name,
+            sha256: hash,
+            byteSize: Int64(png.count),
+            rect: CGRect(x: 20, y: 10, width: 100, height: 60),
+            sampleSize: 2
+        )
+        XCTAssertEqual(Int(region.size.width), 50)
+        XCTAssertEqual(Int(region.size.height), 30)
+
+        let leftHalf = SourceImageFile.splitPage(wideImage, segment: 1)
+        let rightHalf = SourceImageFile.splitPage(wideImage, segment: 2)
+        XCTAssertEqual(Int(leftHalf.size.width), 120)
+        XCTAssertEqual(Int(leftHalf.size.height), 120)
+        XCTAssertEqual(Int(rightHalf.size.width), 120)
+        XCTAssertEqual(Int(rightHalf.size.height), 120)
+
+        let cropped = SourceImageFile.crop(wideImage, rect: CGRect(x: 24, y: 12, width: 192, height: 96))
+        XCTAssertEqual(Int(cropped.size.width), 192)
+        XCTAssertEqual(Int(cropped.size.height), 96)
+
+        let sampled = try XCTUnwrap(SourceImageFile.samplePixels(wideImage, sampleSize: 2))
+        XCTAssertEqual(sampled.width, 120)
+        XCTAssertEqual(sampled.height, 60)
+        XCTAssertEqual(sampled.pixels.first, -1)
+        let centerPixel = sampled.pixels[30 * sampled.width + 60]
+        XCTAssertEqual(UInt32(bitPattern: centerPixel) & 0x00FFFFFF, 0)
+    }
 }

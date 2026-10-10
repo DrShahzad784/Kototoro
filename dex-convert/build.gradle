@@ -39,6 +39,7 @@ def androidSdk = {
 
 tasks.withType(Test).configureEach {
 	useJUnitPlatform()
+	systemProperty 'kototoro.dex.runtime.classpath', sourceSets.main.runtimeClasspath.asPath
 	if (androidSdk != null) systemProperty 'kototoro.android.sdk', androidSdk
 	// Optional real artifacts (not committed): a DEX-only plugin jar such as UMA's uma.jar.
 	providers.gradleProperty('dexPluginJar').orNull?.with { systemProperty 'kototoro.dex.real.plugin', it }
@@ -49,5 +50,8 @@ tasks.register('convertApk', JavaExec) {
 	dependsOn tasks.named('classes')
 	classpath = sourceSets.main.runtimeClasspath
 	mainClass = 'org.skepsun.kototoro.dex.DexConvertCliKt'
-	args providers.gradleProperty('extensionApk').getOrElse(''), providers.gradleProperty('extensionJar').getOrElse('')
+	// Either one -PextensionApk/-PextensionJar pair, or -PconvertPairs=<in>|<out>|<in>|<out>... for several inputs.
+	def pairs = providers.gradleProperty('convertPairs').orNull
+	if (pairs != null) args pairs.split('\\|').toList()
+	else args providers.gradleProperty('extensionApk').getOrElse(''), providers.gradleProperty('extensionJar').getOrElse('')
 }

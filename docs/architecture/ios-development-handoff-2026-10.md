@@ -25,6 +25,8 @@
 | 默认 iOS | SwiftUI 分类创建/读取/重启恢复；共享 Room v84 | 共享 Kotlin framework；无需 JVM 运行时 |
 | 独立 fixture 预览 | 枚举/列表/详情/章节/PNG 阅读、翻页、换章与返回导航 | 自行构建模拟器 Zero；自有测试 ABI/JAR |
 | 真实 APK 预览 | 再漫画 1.6.0 在线列表、详情/封面/章节与首章图片阅读 | 同一 Zero；固定 Mobile API；Mac 上转换的 APK |
+| 真实扩展预览（§94） | Mihon 漫画、Tsundoku 小说正文、Aniyomi 播放、JAR（kototoro-parsers 95 源）漫画/小说/视频 | 同一 Zero；`stage-mihon-preview.py` 固定 5 个样本 |
+| 默认 iOS（§93） | 苹果 CMS / TVBox type 0/1 导入、浏览/分类/搜索、按线路选集、AVPlayer 播放 | 无需 JVM；`:source-tvbox` 原生运行 |
 
 真实样本是再漫画 `MIHON_524579092615598717`。列表返回 10 项；《大理寺日志》返回 392 个章节，
 首章两张图片已在模拟器实际解码并翻页。站点数据与网络可用性会变化，这些数量是本次验证结果。
@@ -150,6 +152,11 @@ JPEG 的本机 JVM 验证记录为 `ios-reader-jvm-probe.log`。真实详情/阅
   `XCFrameworkConfig(project, name)`。首次工具链/下载经验见主方案 §90。
 
 ## 6. 后续接手顺序与验收点
+
+> §93 苹果 CMS、§94 Aniyomi/Tsundoku/JAR 已接入。后续：设备端 APK/DEX 转换与用户安装界面、WKWebView/Cloudflare 桥
+> （BAOZIMH、WENKU8 等需要）、AVPlayer 外挂字幕/音轨 → LNReader/Legado（iOS 用
+> JavaScriptCore 实现原生 `SourceRuntime`，与 CMS 同样走 `RoutedSourceRuntime`）→ Cloudstream（延后）。
+> 小说阅读器建议先从 Android 抽取分页/排版无关的 `novel-core`（章节正文 HTML → 段落模型、进度锚点），iOS 用 TextKit 2 渲染。
 
 1. **用户扩展导入/安装记录**：先验证共享转换器能在 Mobile JVM 执行；复用校验与缓存版本，
    不另建 Swift 转换实现。同时设计现有常驻 registry 的加载入口，不能关闭兼容平台再在同进程重建。

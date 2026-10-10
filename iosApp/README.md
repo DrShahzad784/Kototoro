@@ -2,12 +2,13 @@
 
 接手开发先读 [iOS 阶段交接记录](../docs/architecture/ios-development-handoff-2026-10.md)，
 其中列出调用链、生命周期约束、验证证据与后续工作入口。
+当前产品实施与验收状态见 [主要功能实施记录](../docs/architecture/ios-product-implementation-2026-10.md)。
 
 本模块已打通 SwiftUI 漫画库分类 → Kotlin/Native → 共享 Room v84 数据库，以及可选的
 SwiftUI → 共享源协议 → C/JNI → OpenJDK Mobile Zero → JVM source-host 源调用链。
 可选预览已支持列表 → 详情/封面 → 章节 → 图片阅读，以及前后翻页和同分支换章。
 `ios-shared` 是 iOS 平台装配层，复用 `core-db`、`core-domain`、`core-source`、`core-backup`、`core-net`
-和 `reader-core`。Swift 只消费应用接口，不直接操作 Room 实体或 JVM parser ABI。
+和 `core-library`、`reader-core`。Swift 只消费应用接口，不直接操作 Room 实体或 JVM parser ABI。
 
 ## 本机运行
 
@@ -32,8 +33,8 @@ xcodebuild -project "iosApp/Kototoro.xcodeproj" -scheme "Kototoro" \
     -derivedDataPath "iosApp/build/DerivedData" CODE_SIGNING_ALLOWED=NO build
 ```
 
-默认应用支持添加、读取分类；分类写入同一数据库并在重启后恢复。默认构建不包含第三方 JVM/兼容 JAR，
-浏览页显示运行时未包含的提示。下面的开发预览可枚举源、显示第一页列表并进入详情与章节阅读。
+默认应用支持 CMS 浏览／详情／播放、收藏分类、历史、播放进度恢复与手动更新检测。
+默认构建不包含第三方 JVM/兼容 JAR；下面的开发预览支持扩展仓库、安装、搜索与分页、漫画／小说阅读。
 数据库位于应用沙盒 `Library/Application Support/Kototoro/library.db`，不在缓存或临时目录。
 不使用破坏性 schema 回退；导入旧版本 SQLite 文件的迁移不属于当前切片。
 
@@ -65,6 +66,27 @@ UI 测试每次创建唯一分类，测试数据留在测试设备沙盒中。
 `-Dhttp.proxyHost=127.0.0.1 -Dhttp.proxyPort=7890 -Dhttps.proxyHost=127.0.0.1 -Dhttps.proxyPort=7890`。
 Xcode 构建阶段也会调用 Gradle，可用命令作用域内的 `JAVA_TOOL_OPTIONS` 传入这些参数，或在首次构建前完成下载。
 
+## 苹果 CMS 影视源（默认构建）
+
+浏览页右上角"添加源"，粘贴苹果 CMS 接口（如 `https://…/api.php/provide/vod/`）或 TVBox 配置/多仓地址。
+站点存入共享 `json_sources` 表（与 Android 同格式），由 `:source-tvbox` 在 Kotlin/Native 中执行，
+播放使用系统 `AVPlayerViewController`。type 3/4 爬虫站点与加密配置暂不支持。部署目标为 iOS 26。
+
+本机端到端测试先启动 fixture（需要 ffmpeg，产物在 ignored `iosApp/build/cms-fixture`），再运行 XCTest：
+
+```bash
+python3 "iosApp/Scripts/serve-cms-fixture.py" &
+xcodebuild -project "iosApp/Kototoro.xcodeproj" -scheme Kototoro \
+    -configuration Debug -destination 'platform=iOS Simulator,id=<UUID>' \
+    -derivedDataPath "iosApp/build/DerivedData" CODE_SIGNING_ALLOWED=NO \
+    -only-testing:KototoroUITests/VideoSourceTests test
+```
+
+未启动 fixture 时该用例跳过。共享逻辑测试：`./gradlew :source-tvbox:jvmTest`。
+
+真实站点（可选，依赖网络）：`TEST_RUNNER_KOTOTORO_REAL_CMS=<接口> xcodebuild … -only-testing:KototoroUITests/VideoSourceTests/testRealAppleCmsSitePlaysOnSimulator test`；
+批量探测：`./gradlew :source-tvbox:jvmTest --tests '*OnlineProbe*' -PtvboxOnlineList=<每行一个地址的文件> [-PtvboxProxy=127.0.0.1:7890]`。
+
 ## 嵌入式 JVM 模拟器预览
 
 额外需要 JDK 24。所有下载/源码/构建工具/原生库/兼容 JAR 均在 ignored `iosApp/build` 中；
@@ -95,6 +117,18 @@ xcodebuild -project "iosApp/Kototoro.xcodeproj" -scheme Kototoro \
 仍不是生态兼容性验收。
 不同预览使用各自的 DerivedData 目录。普通构建若复用含 JVM 产物的目录会明确拒绝，避免残留的第三方产物进入默认包。
 
+## 真实扩展预览（Mihon / Tsundoku / Aniyomi / JAR）
+
+`stage-mihon-preview.py` 现在固定 5 个样本（见脚本顶部 `ARTIFACTS`）：再漫画、AllNovelFull、AnimeGG、Anime1.me 与
+kototoro-parsers 插件 137，在 Mac 上转换后与 parser-host 一起装入 `iosApp/build/jvm-real-api`。上模拟器前可先在 Mac JVM 探测：
+
+```bash
+python3 "iosApp/Scripts/probe-jvm-preview.py"                 # 每个生态一个源
+python3 "iosApp/Scripts/probe-jvm-preview.py" MANGADEX BILINOVEL FANTUAN
+```
+
+模拟器用例：`-only-testing:KototoroUITests/ExtensionEcosystemTests`（构建参数同下方真实 APK 预览）。
+
 ## 真实 Mihon APK 预览
 
 ```bash
@@ -123,17 +157,37 @@ JNI 复用常驻 JVM/Java 会话；Java 的临时目录与数据目录位于应�
 `IosSources` 复用 `core-source/SourceProtocolClient`，Swift 不重复实现版本/请求 ID/错误/64 位 ID 协议。
 
 APK 转换期间修复了 dex2jar 2.4.38 的 `java/util/Object` 公共父类型回退错误，仅纠正栈帧，
-不改写指令/字段/字符串；转换缓存版本由 3 升为 4，已有 Windows 消费者同步获益。
+不改写指令/字段/字符串；转换缓存版本现为 5，新增不依赖 `jdk.zipfs` 的目录输出／ZIP 流式封装，
+支持在移动 JVM 内转换 APK，已有桌面消费者同步获益。
 最小 DEX/JVM 回归覆盖外部类型不在转换 classpath、实际运行时两条分支均可验证并执行。
+
+### 仓库、设备安装与记录闭环
+
+浏览页的“仓库与扩展”可粘贴 repo-hub 的 `kototoro://add-repo?url=…&kind=…`，也可从系统打开链接，
+或直接从系统文件选择器导入本地 APK／JAR 扩展包。
+支持 Mihon、Aniyomi、Tsundoku、JAR 仓库与 TVBox/CMS 地址，扩展转换与注册在当前移动 JVM 会话中执行。
+仓库、托管安装、收藏、历史、漫画／小说书签和阅读／播放进度会在重启后恢复；记录页支持手动检查收藏更新。
+
+确定性安装回归使用原始 APK，设备负责转换；本地测试服务器：
+
+```bash
+python3 "iosApp/Scripts/serve-repository-fixture.py"
+```
+
+同时启动前述 CMS fixture 后，使用真实 JVM 预览构建参数运行
+`-only-testing:KototoroUITests/ProductFlowTests -collect-test-diagnostics never test`。
+漫画 fixture UI 回归也验证章节／更多面板、书签、下载、换章和重启续读。
+这些证据为 Apple Silicon 模拟器验证，不代表真机／发布包已验收。
 
 详情、章节与页对象在 Kotlin 内保留完整 `SourceContent` / `SourceChapter` / `SourcePage`，包括 opaque
 字段和原生页面索引；Swift 不重建请求模型。翻章复用 `SourceChapterNavigation` 的来源/分支规则。
 封面与正文图片均由 JVM 源客户端下载并物化，保持扩展自己的 headers/interceptors/cookies，
 Swift 读取同一沙盒图片目录中的文件，校验路径、长度、SHA-256 后使用 ImageIO 在后台解码。
-ImageIO 长边上限为 4096 像素，阅读器只持有当前页的解码图片；超长图片的精细分块仍待接入。
+基础预览图层按 `ImageDecodeSize`（4MP 像素预算、16384 纹理上限）计算采样尺寸，阅读器持有有限的当前页与邻页解码窗口；
+同时支持 `reader-core` 宽页左右拆分（`PageSegment`）、白边自动裁切（`ReaderEdgeDetection`）与超长图可视区域分块叠加解码（`VisibleImageTiles`）。
 
-新增 Native 回归验证完整隐藏字段及图片身份校验；`SourceImageFileTests` 验证实际 PNG 解码、篡改、
-长度错误、路径越界、符号链接、超限和无法解码的数据。可单独执行：
+新增 Native 回归验证完整隐藏字段、阅读器分块／裁边／宽页拆分及图片身份校验；`SourceImageFileTests` 验证实际 PNG 解码、篡改、
+长度错误、路径越界、符号链接、超限、无法解码的数据，以及尺寸探测、区域降采样解码、宽页切分与像素采样。可单独执行：
 
 ```bash
 xcodebuild -project "iosApp/Kototoro.xcodeproj" -scheme Kototoro \
@@ -144,16 +198,15 @@ xcodebuild -project "iosApp/Kototoro.xcodeproj" -scheme Kototoro \
 
 ## 接续范围
 
-1. 接入用户选择 APK/JAR 的导入与安装记录，继续复用共享转换器/校验器。
-2. 补充搜索、分页、收藏/历史与阅读进度持久化，接入完整阅读场景与缩放/分块。
-3. 接入 WKWebView、WebKit Cookie、JavaScript 与图形 native 桥，扩大代表源兼容验证。
-4. 补充真机 Zero 构建/启动、内存和代表源性能数据；模拟器测试不替代主方案 G0/G2。
-5. 完成运行时/兼容层的分发与许可证 S3 门槛。
+1. 在真实超长条漫源与真机内存压力下补充端到端阅读器性能验收。
+2. 接入 WKWebView、WebKit Cookie、JavaScript 与图形 native 桥，扩大代表源兼容验证。
+3. 补充真机 Zero 构建/启动、内存和代表源性能数据；模拟器测试不替代主方案 G0/G2。
+4. 完成运行时/兼容层的分发与许可证 S3 门槛，以及后台更新检测与下载队列调度。
 
 [上游 IOS_PORT.md](https://github.com/az4521/TachiyomiAZ/blob/master/IOS_PORT.md) 记录了 OpenJDK 模拟器
 切片对 `MAP_JIT`、W^X 与 `pthread_jit_write_protect_np` 的专用补丁；接入 JVM 时需要逐项核对。
 
 第三方源码/运行时仅用于本地可选开发预览，没有加入仓库或默认发行包。WKWebView/完整 Cookie 同步、
-JS/图形、用户扩展安装界面、备份恢复、完整漫画库和完整场景阅读器仍待实现；
-当前基本图片阅读不能代表全量源或真机兼容性。Swift Task 取消会丢弃过期结果，
+JS/图形与备份恢复仍待实现；
+当前图片阅读与模拟器回归不能代表全量源或真机兼容性。Swift Task 取消会丢弃过期结果，
 尚不能中断已进入同步 JNI 的网络调用；调用仍受 JVM 源客户端的超时约束。

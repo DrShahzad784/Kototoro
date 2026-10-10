@@ -7,7 +7,13 @@ import java.nio.file.Path
 
 /** Stable, synchronous JNI ABI. The native owner retains this instance for its entire session. */
 class EmbeddedSourceHost private constructor(private val session: SourceHostSession) : Closeable {
-    fun exchange(requestJson: String): String = runBlocking { session.exchange(requestJson) }
+    fun exchange(requestJson: String): String = try {
+        runBlocking { session.exchange(requestJson) }
+    } catch (failure: Exception) {
+        // JNI preserves the top-level message; keep conversion/loading causes actionable on mobile hosts.
+        val causes = generateSequence(failure as Throwable) { it.cause }.take(5).joinToString(" → ") { it.toString() }
+        throw IllegalStateException(causes, failure)
+    }
 
     override fun close() = session.close()
 

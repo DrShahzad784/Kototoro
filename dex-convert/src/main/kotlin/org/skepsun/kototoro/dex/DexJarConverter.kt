@@ -44,7 +44,7 @@ data class DexConversionReport(
 /** Converts every `classes*.dex` of an APK or DEX-only plugin jar into one class-file jar. */
 object DexJarConverter {
     /** Bump when the library or its settings change: converted artifacts are cached under this version. */
-    const val VERSION = 4
+    const val VERSION = 5
 
     private const val MAXIMUM_DEX_BYTES = 128L * 1024 * 1024
     private const val MAXIMUM_BROKEN_RECORDED = 64
@@ -143,23 +143,26 @@ object DexJarConverter {
                 if (broken.size < MAXIMUM_BROKEN_RECORDED) broken += "${method.owner}.${method.name}"
             }
         }
-        val converted = Files.createTempFile("kototoro-dex-", ".jar")
+        // Mobile OpenJDK omits jdk.zipfs. Translate into an ordinary directory and stream the class files into
+        // our ZIP writer instead of asking dex2jar to mount a jar as a filesystem.
+        val converted = Files.createTempDirectory("kototoro-dex-")
         try {
             // computeFrames: the JVM verifier insists on stack map frames for class versions that dex2jar emits.
             val reader = DexRepairPlan.Reader(DexFileReader(dex), plan)
             Dex2jar.from(reader).withExceptionHandler(handler).reUseReg(false).topoLogicalSort().skipDebug(true)
                 .optimizeSynchronized(false).printIR(false).noCode(false).skipExceptions(false).computeFrames(true).dontSanitizeNames(true).to(converted)
             var count = 0
-            ZipFile(converted.toFile()).use { zip ->
-                for (entry in zip.entries()) {
-                    if (entry.isDirectory || !written.add(entry.name)) continue
-                    output.putNextEntry(ZipEntry(entry.name).apply { time = 0 })
-                    zip.getInputStream(entry).use { input ->
-                        if (entry.name.endsWith(".class")) output.write(correctFallbackFrames(input.readBytes()))
+            Files.walk(converted).use { files ->
+                for (file in files.filter { Files.isRegularFile(it) }.sorted().iterator()) {
+                    val name = converted.relativize(file).toString().replace('\\', '/')
+                    if (!written.add(name)) continue
+                    output.putNextEntry(ZipEntry(name).apply { time = 0 })
+                    Files.newInputStream(file).use { input ->
+                        if (name.endsWith(".class")) output.write(correctFallbackFrames(input.readBytes()))
                         else input.copyTo(output)
                     }
                     output.closeEntry()
-                    if (entry.name.endsWith(".class")) count++
+                    if (name.endsWith(".class")) count++
                 }
             }
             return Translated(count, reader.repaired)
@@ -168,7 +171,9 @@ object DexJarConverter {
         } catch (error: Exception) {
             throw DexConversionException(DexConversionFailure.TRANSLATION_FAILED, error)
         } finally {
-            Files.deleteIfExists(converted)
+            Files.walk(converted).use { files ->
+                files.sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
         }
     }
 

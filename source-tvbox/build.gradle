@@ -1,0 +1,53 @@
+// TVBox / Apple CMS (MacCMS) sources as a shared SourceRuntime. Pure Kotlin: the platform supplies HTTP through
+// TvBoxHttp, so the default iOS build serves these sources without the embedded JVM. Spider sites (type 3/4, csp_)
+// stay on Android's runtimes.
+plugins {
+	id 'org.jetbrains.kotlin.multiplatform'
+	id 'org.jetbrains.kotlin.plugin.serialization'
+}
+
+kotlin {
+	jvm {
+		compilerOptions {
+			jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11
+		}
+	}
+	iosArm64()
+	iosSimulatorArm64()
+
+	sourceSets {
+		getByName('commonMain') {
+			dependencies {
+				api project(':core-source')
+				implementation "org.jetbrains.kotlinx:kotlinx-serialization-json:${libs.versions.serialization.get()}"
+				implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:${libs.versions.coroutines.get()}"
+			}
+		}
+		getByName('jvmTest') {
+			dependencies {
+				implementation 'org.junit.jupiter:junit-jupiter:5.8.2'
+				runtimeOnly 'org.junit.platform:junit-platform-launcher:1.8.2'
+				implementation libs.kotlinx.coroutines.test
+			}
+		}
+	}
+}
+
+tasks.withType(Test).configureEach {
+	useJUnitPlatform()
+	// Opt-in real-site probe (MacCmsOnlineProbeTest); off by default so CI never depends on third-party sites.
+	def online = providers.gradleProperty('tvboxOnlineList')
+	if (online.isPresent()) {
+		systemProperty 'tvboxOnlineList', file(online.get()).absolutePath
+		systemProperty 'tvboxOnlineReport', layout.buildDirectory.file('reports/tvbox-online.txt').get().asFile.absolutePath
+		outputs.upToDateWhen { false }
+		// Optional "host:port" for networks where the sites need a proxy (see the repo hub notes).
+		providers.gradleProperty('tvboxProxy').orNull?.split(':')?.with { proxy ->
+			['http', 'https'].each { scheme ->
+				systemProperty "${scheme}.proxyHost", proxy[0]
+				systemProperty "${scheme}.proxyPort", proxy[1]
+			}
+		}
+		testLogging { showStandardStreams = true }
+	}
+}

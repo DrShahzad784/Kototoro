@@ -25,6 +25,7 @@ kotlin {
 				api "org.jetbrains.kotlinx:kotlinx-serialization-json:${libs.versions.serialization.get()}"
 				implementation "org.jetbrains.kotlinx:kotlinx-serialization-protobuf:${libs.versions.serialization.get()}"
 				implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:${libs.versions.coroutines.get()}"
+				implementation libs.okio
 			}
 		}
 		getByName('jvmTest') {

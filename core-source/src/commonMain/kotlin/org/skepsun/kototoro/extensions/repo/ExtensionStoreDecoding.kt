@@ -4,25 +4,59 @@ package org.skepsun.kototoro.extensions.repo
 
 import kotlinx.serialization.json.*
 import kotlinx.serialization.protobuf.ProtoBuf
+import okio.Buffer
+import okio.GzipSource
+import okio.buffer
 
 private val StoreJson = Json { ignoreUnknownKeys = true }
 
-/** Protobuf JSON uses prefixed enum names and quoted int64 values; never route IDs through Double. */
-fun decodeExtensionStoreIndex(bytes: ByteArray, protobuf: Boolean): ExtensionStoreIndex = if (protobuf) {
-    ProtoBuf.decodeFromByteArray(ExtensionStoreIndex.serializer(), bytes)
-} else {
-    val root = StoreJson.parseToJsonElement(bytes.decodeToString()).jsonObject
-    val list = root["extensionList"]?.takeUnless { it is JsonNull }?.let { normalizeList(it.jsonObject) }
-    StoreJson.decodeFromJsonElement(ExtensionStoreIndex.serializer(), JsonObject(root.toMutableMap().apply {
-        if (list != null) put("extensionList", list)
-    }))
+fun gunzipExtensionStoreBytes(bytes: ByteArray): ByteArray {
+    if (bytes.size < 2 || bytes[0] != 0x1f.toByte() || bytes[1] != 0x8b.toByte()) return bytes
+    val source = GzipSource(Buffer().write(bytes)).buffer()
+    return try {
+        source.readByteArray()
+    } finally {
+        source.close()
+    }
 }
 
-fun decodeExtensionStoreList(bytes: ByteArray, protobuf: Boolean): ExtensionStoreIndex.ExtensionList = if (protobuf) {
-    ProtoBuf.decodeFromByteArray(ExtensionStoreIndex.ExtensionList.serializer(), bytes)
-} else {
-    StoreJson.decodeFromJsonElement(ExtensionStoreIndex.ExtensionList.serializer(),
-        normalizeList(StoreJson.parseToJsonElement(bytes.decodeToString()).jsonObject))
+/** Protobuf JSON uses prefixed enum names and quoted int64 values; never route IDs through Double. */
+fun decodeExtensionStoreIndex(bytes: ByteArray, protobuf: Boolean): ExtensionStoreIndex {
+    val payload = gunzipExtensionStoreBytes(bytes)
+    return if (protobuf) {
+        ProtoBuf.decodeFromByteArray(ExtensionStoreIndex.serializer(), payload)
+    } else {
+        val root = StoreJson.parseToJsonElement(payload.decodeToString()).jsonObject
+        val meta = root["meta"]?.takeUnless { it is JsonNull }?.jsonObject
+        if (meta != null && root["name"] == null) {
+            val name = meta["name"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            val shortName = meta["shortName"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            val website = meta["website"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            val signingKey = meta["signingKeyFingerprint"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            val indexV2 = root["index_v2"]?.jsonPrimitive?.contentOrNull ?: "index.min.json"
+            return ExtensionStoreIndex(
+                name = name,
+                badgeLabel = shortName,
+                signingKey = signingKey,
+                contact = ExtensionStoreIndex.Contact(website = website),
+                extensionListUrl = indexV2,
+            )
+        }
+        val list = root["extensionList"]?.takeUnless { it is JsonNull }?.let { normalizeList(it.jsonObject) }
+        StoreJson.decodeFromJsonElement(ExtensionStoreIndex.serializer(), JsonObject(root.toMutableMap().apply {
+            if (list != null) put("extensionList", list)
+        }))
+    }
+}
+
+fun decodeExtensionStoreList(bytes: ByteArray, protobuf: Boolean): ExtensionStoreIndex.ExtensionList {
+    val payload = gunzipExtensionStoreBytes(bytes)
+    return if (protobuf) {
+        ProtoBuf.decodeFromByteArray(ExtensionStoreIndex.ExtensionList.serializer(), payload)
+    } else {
+        StoreJson.decodeFromJsonElement(ExtensionStoreIndex.ExtensionList.serializer(),
+            normalizeList(StoreJson.parseToJsonElement(payload.decodeToString()).jsonObject))
+    }
 }
 
 private fun normalizeList(list: JsonObject): JsonObject = JsonObject(list.toMutableMap().apply {
@@ -45,7 +79,8 @@ private fun normalizeList(list: JsonObject): JsonObject = JsonObject(list.toMuta
  * same model as the modern index, APK-only, under [repositoryName] since the legacy file has no header.
  */
 fun decodeLegacyExtensionIndex(bytes: ByteArray, repositoryName: String): ExtensionStoreIndex {
-    val rows = StoreJson.parseToJsonElement(bytes.decodeToString()).jsonArray
+    val payload = gunzipExtensionStoreBytes(bytes)
+    val rows = StoreJson.parseToJsonElement(payload.decodeToString()).jsonArray
     val extensions = rows.map { element ->
         val row = element.jsonObject
         fun text(key: String) = row[key]?.jsonPrimitive?.contentOrNull.orEmpty()

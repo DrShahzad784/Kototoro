@@ -1,27 +1,35 @@
 import Foundation
 import KototoroShared
 
-/// Owns the JNI session. The JVM and its static libraries live until process exit.
+/// Owns the JNI session. The JVM and its static libraries live until process exit. Exchanges run concurrently on
+/// their callers' threads (the bridge attaches each thread); the condition only guards opening and closing.
 final class NativeSourceTransport: IosSourceTransport {
-    private let lock = NSLock()
+    private let condition = NSCondition()
     private var session: OpaquePointer?
     private var closed = false
+    private var opening = false
+    private var active = 0
 
     static var isAvailable: Bool { ktr_vm_available() != 0 }
+    private static let storageName: String = {
+        guard let file = Bundle.main.resourceURL?.appendingPathComponent("jvm/sources/config.json"),
+              let bytes = try? Data(contentsOf: file),
+              let config = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
+              (config["platformClass"] as? String)?.hasPrefix("fixture.") == true else { return "sources" }
+        return "sources-fixture"
+    }()
 
     static var dataDirectory: URL {
         get throws {
             try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
                                         appropriateFor: nil, create: true)
-                .appendingPathComponent("Kototoro/sources", isDirectory: true)
+                .appendingPathComponent("Kototoro/\(storageName)", isDirectory: true)
         }
     }
 
     func exchange(requestJson: String) throws -> String {
-        lock.lock()
-        defer { lock.unlock() }
-        guard !closed else { throw failure("源会话已关闭") }
-        if session == nil { try open() }
+        let session = try acquire()
+        defer { release() }
         let input = Array(requestJson.utf16)
         var output: UnsafeMutablePointer<UInt16>?
         var length = 0
@@ -34,11 +42,40 @@ final class NativeSourceTransport: IosSourceTransport {
         return String(decoding: UnsafeBufferPointer(start: output, count: length), as: UTF16.self)
     }
 
+    /// Opens the session once; concurrent first callers wait for it instead of starting a second VM session.
+    private func acquire() throws -> OpaquePointer? {
+        condition.lock()
+        defer { condition.unlock() }
+        while opening { condition.wait() }
+        guard !closed else { throw failure("源会话已关闭") }
+        if session == nil {
+            opening = true
+            condition.unlock()
+            var openError: Error?
+            do { try open() } catch { openError = error }
+            condition.lock()
+            opening = false
+            condition.broadcast()
+            if let openError { throw openError }
+        }
+        active += 1
+        return session
+    }
+
+    private func release() {
+        condition.lock()
+        active -= 1
+        if active == 0 { condition.broadcast() }
+        condition.unlock()
+    }
+
     func close() {
-        lock.lock()
-        defer { lock.unlock() }
+        condition.lock()
+        defer { condition.unlock() }
         guard !closed else { return }
         closed = true
+        // Never free the native session while another thread is still inside an exchange.
+        while active > 0 || opening { condition.wait() }
         if let session {
             var error: UnsafeMutablePointer<CChar>?
             _ = ktr_session_close(session, &error)
@@ -91,6 +128,15 @@ final class NativeSourceTransport: IosSourceTransport {
             extensions[index]["path"] = configDirectory.appendingPathComponent(path).path
         }
         config["jars"] = extensions
+        // Parser plugin JARs ship next to the extensions; the session resolves relative paths against the data
+        // directory, so make them absolute like the extension JARs.
+        if var plugins = config["plugins"] as? [[String: Any]] {
+            for index in plugins.indices {
+                guard let path = plugins[index]["path"] as? String else { throw failure("插件路径缺失") }
+                plugins[index]["path"] = configDirectory.appendingPathComponent(path).path
+            }
+            config["plugins"] = plugins
+        }
         // Swift and the host share one image directory, irrespective of a preview's relative config path.
         config["imageDirectory"] = "images"
         let json = String(decoding: try JSONSerialization.data(withJSONObject: config), as: UTF8.self)

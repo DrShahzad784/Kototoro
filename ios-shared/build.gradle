@@ -23,10 +23,14 @@ kotlin {
         commonMain.dependencies {
             implementation project(':core-db')
             implementation project(':core-domain')
+            implementation project(':core-library')
             implementation project(':core-backup')
             implementation project(':core-source')
             implementation project(':core-net')
             implementation project(':reader-core')
+            implementation project(':source-tvbox')
+            // Apple's URL loading system; core-net already pins Ktor and leaves engines to platforms.
+            implementation libs.ktor.client.darwin
             // Same pinned driver already used by the shared database's JVM tests.
             implementation 'androidx.sqlite:sqlite-bundled:2.6.2'
             implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:${libs.versions.coroutines.get()}"

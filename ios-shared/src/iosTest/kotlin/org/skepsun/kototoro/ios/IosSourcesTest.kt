@@ -3,6 +3,8 @@ package org.skepsun.kototoro.ios
 import kotlinx.coroutines.runBlocking
 import org.skepsun.kototoro.core.source.SourceCall
 import org.skepsun.kototoro.core.source.SourceChapter
+import org.skepsun.kototoro.core.source.SourceChapterContent
+import org.skepsun.kototoro.core.source.SourceContentImage
 import org.skepsun.kototoro.core.source.SourceContent
 import org.skepsun.kototoro.core.source.SourceCoverArtifact
 import org.skepsun.kototoro.core.source.SourceImageArtifact
@@ -79,6 +81,34 @@ class IosSourcesTest {
             runtime.close()
         }
         assertEquals(true, closed)
+    }
+
+    @Test
+    fun novelTextAndEcosystemsAreProjectedForSwift() = runBlocking {
+        val novel = SourceRef("TSUNDOKU_42", "en", "HENTAI_NOVEL")
+        val runtime = IosSources(object : IosSourceTransport {
+            override fun exchange(requestJson: String): String {
+                val request = SourceProtocolJson.decodeFromString<SourceRequest>(requestJson)
+                val call = request.call as SourceCall.ChapterContent
+                assertEquals(novel, call.chapter.source)
+                val result = SourceResult.ChapterContent(SourceChapterContent("<p>第一段</p>",
+                    listOf(SourceContentImage("https://fixture.invalid/i.png", mapOf("Referer" to "x")))))
+                return SourceProtocolJson.encodeToString(SourceResponse(1, request.requestId, result))
+            }
+            override fun close() {}
+        })
+        val text = runtime.chapterText(IosSourceChapter(chapter.copy(source = novel)))!!
+        assertEquals("<p>第一段</p>", text.html)
+        assertEquals(listOf("https://fixture.invalid/i.png"), text.images)
+        assertEquals(mapOf("Referer" to "x"), text.headers("https://fixture.invalid/i.png"))
+        val listed = IosSource(novel.name, novel.name, "en", novel.contentType, "extension")
+        assertEquals("TSUNDOKU", listed.ecosystem)
+        assertEquals("NOVEL", listed.mediaKind)
+        assertEquals(true, listed.isAdult)
+        assertEquals("JAR", IosSource("MANGADEX", "", "", "MANGA", "extension").ecosystem)
+        assertEquals("ANIYOMI", IosSource("ANIYOMI_1", "", "", "VIDEO", "extension").ecosystem)
+        assertEquals("CMS", IosSource("JSON_TVBOX_A", "", "", "VIDEO", "video").ecosystem)
+        assertEquals("VIDEO", IosSourceContent(content.copy(source = SourceRef("ANIYOMI_1", "", "HENTAI_VIDEO"))).mediaKind)
     }
 
     @Test
