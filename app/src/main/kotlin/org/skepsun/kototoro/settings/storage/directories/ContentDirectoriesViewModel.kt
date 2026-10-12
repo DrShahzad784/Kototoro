@@ -58,21 +58,24 @@ class ContentDirectoriesViewModel @Inject constructor(
     }
 
     fun onRemoveClick(root: LocalStorageRoot, kind: StorageContentKind) {
-        when (kind) {
-            StorageContentKind.MANGA -> {
-                settings.userSpecifiedContentDirectoryUris -= root.uri
-                if (settings.mangaStorageUri == root.uri) settings.mangaStorageUri = null
+        launchLoadingJob(Dispatchers.IO) {
+            when (kind) {
+                StorageContentKind.MANGA -> {
+                    settings.userSpecifiedContentDirectoryUris -= root.uri
+                    if (settings.mangaStorageUri == root.uri) settings.mangaStorageUri = null
+                }
+                StorageContentKind.NOVEL -> {
+                    settings.userSpecifiedNovelDirectoryUris -= root.uri
+                    if (settings.novelStorageUri == root.uri) settings.novelStorageUri = null
+                }
+                StorageContentKind.VIDEO -> {
+                    settings.userSpecifiedVideoDirectoryUris -= root.uri
+                    if (settings.videoStorageUri == root.uri) settings.videoStorageUri = null
+                }
             }
-            StorageContentKind.NOVEL -> {
-                settings.userSpecifiedNovelDirectoryUris -= root.uri
-                if (settings.novelStorageUri == root.uri) settings.novelStorageUri = null
-            }
-            StorageContentKind.VIDEO -> {
-                settings.userSpecifiedVideoDirectoryUris -= root.uri
-                if (settings.videoStorageUri == root.uri) settings.videoStorageUri = null
-            }
+            storageManager.clearUnusedLocalArchiveCache()
+            loadList()
         }
-        loadList()
     }
 
     fun onDefaultClick(root: LocalStorageRoot, kind: StorageContentKind) {

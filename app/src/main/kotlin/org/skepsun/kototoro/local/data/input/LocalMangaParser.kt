@@ -37,6 +37,7 @@ import org.skepsun.kototoro.core.util.ext.toListSorted
 import org.skepsun.kototoro.core.util.ext.toUnderlyingZipUri
 import org.skepsun.kototoro.core.util.ext.withFragmentFrom
 import org.skepsun.kototoro.local.data.ContentIndex
+import org.skepsun.kototoro.local.data.LocalSafArchiveCache
 import org.skepsun.kototoro.local.data.hasZipExtension
 import org.skepsun.kototoro.local.data.isZipArchive
 import org.skepsun.kototoro.local.data.output.LocalContentOutput.Companion.ENTRY_NAME_INDEX
@@ -437,10 +438,15 @@ class LocalContentParser {
                         )
                     }
             }
-            val localFile = materialize(file)
-            val localUrl = localFile.toUri().withFragmentFrom(chapter.url.toUri()).toString()
-            val localChapter = chapter.copy(url = localUrl)
-            return LocalContentParser(localFile).getPages(localChapter)
+            return withMaterialized(file) { localFile ->
+                val localUrl = localFile.toUri().withFragmentFrom(chapter.url.toUri()).toString()
+                val localChapter = chapter.copy(url = localUrl)
+                LocalContentParser(localFile).getPages(localChapter).map { page ->
+                    val entry = page.url.toUri().fragment
+                    val sourceUrl = if (entry.isNullOrEmpty()) file.uri.toString() else file.uri.toZipUri(entry).toString()
+                    page.copy(url = sourceUrl)
+                }
+            }
         }
         return runInterruptible(Dispatchers.IO) {
             val chapterUri = chapter.url.toUri().resolve()
@@ -483,24 +489,26 @@ class LocalContentParser {
             if (directFile != null) {
                 return LocalContentParser(directFile).getContent(withDetails, forceRefresh)
             }
-            val localFile = materialize(file, forceRefresh)
-            val parsed = LocalContentParser(localFile, file.name ?: localFile.name).getContent(withDetails)
-            val stableCoverUrl = parsed.manga.coverUrl
-                ?.toUri()
-                ?.takeIf(Uri::isZipUri)
-                ?.fragment
-                ?.takeIf(String::isNotBlank)
-                ?.let { entry -> file.uri.toZipUri(entry).toString() }
-            val localManga = parsed.manga.copy(
-                url = file.uri.toString(),
-                publicUrl = file.uri.toString(),
-                coverUrl = stableCoverUrl ?: parsed.manga.coverUrl,
-                chapters = parsed.manga.chapters?.map { chapter ->
-                    val chapterUri = file.uri.withFragmentFrom(chapter.url.toUri()).toString()
-                    chapter.copy(url = chapterUri)
-                },
-            )
-            return LocalContent(localManga, localFile, file.uri)
+            return withMaterialized(file, forceRefresh) { localFile ->
+                val parsed = LocalContentParser(localFile, file.name ?: localFile.name).getContent(withDetails)
+                val stableCoverUrl = parsed.manga.coverUrl
+                    ?.toUri()
+                    ?.takeIf(Uri::isZipUri)
+                    ?.fragment
+                    ?.takeIf(String::isNotBlank)
+                    ?.let { entry -> file.uri.toZipUri(entry).toString() }
+                val localManga = parsed.manga.copy(
+                    url = file.uri.toString(),
+                    publicUrl = file.uri.toString(),
+                    coverUrl = stableCoverUrl ?: parsed.manga.coverUrl,
+                    chapters = parsed.manga.chapters?.map { chapter ->
+                        val chapterUri = file.uri.withFragmentFrom(chapter.url.toUri()).toString()
+                        chapter.copy(url = chapterUri)
+                    },
+                )
+                // Capture metadata before releasing the parser's copy; storageUri owns subsequent reads.
+                LocalContent(localManga, localFile, file.uri).also { it.createdAt }
+            }
         }
 
         val index = file.findFile(ENTRY_NAME_INDEX)
@@ -578,7 +586,9 @@ class LocalContentParser {
         } else if (source == LocalNovelSource) {
             novelEntries.forEach { (relativePath, child) ->
                 if (child.name?.endsWith(".epub", ignoreCase = true) == true) {
-                    val parsed = runCatchingCancellable { LocalEpubParser(materialize(child)).parseContent() }.getOrNull()
+                    val parsed = runCatchingCancellable {
+                        withMaterialized(child) { LocalEpubParser(it).parseContent() }
+                    }.getOrNull()
                     parsed?.authors?.filterTo(authors) { it.isNotBlank() }
                     if (description == null) description = parsed?.description?.takeIf(String::isNotBlank)
                     // The parser saw a cache copy of the book: point the cover at the original.
@@ -715,23 +725,22 @@ class LocalContentParser {
 
     private fun String.isNovelName(): Boolean = endsWith(".epub", true) || endsWith(".txt", true)
 
-    private fun materialize(file: UniFile, forceRefresh: Boolean = false): File {
-        val directory = File(cacheDir, "local_saf").apply { mkdirs() }
+    private suspend fun <T> withMaterialized(
+        file: UniFile,
+        forceRefresh: Boolean = false,
+        action: suspend (File) -> T,
+    ): T {
         val extension = file.name?.substringAfterLast('.', "").orEmpty()
         val suffix = extension.takeIf(String::isNotEmpty)?.let { ".$it" }.orEmpty()
-        val target = File(directory, "${file.uri.toString().longHashCode()}$suffix")
-        val sourceLength = file.length()
-        val sourceModified = file.lastModified()
-        if (
-            forceRefresh ||
-                !target.isFile ||
-                sourceLength >= 0L && target.length() != sourceLength ||
-                sourceModified > 0L && target.lastModified() != sourceModified
-        ) {
-            file.openInputStream().use { input -> target.outputStream().use(input::copyTo) }
-            if (sourceModified > 0L) target.setLastModified(sourceModified)
-        }
-        return target
+        return LocalSafArchiveCache.withArchive(
+            cacheDir = cacheDir,
+            fileName = "${file.uri.toString().longHashCode()}$suffix",
+            sourceLength = file.length(),
+            sourceModified = file.lastModified(),
+            forceRefresh = forceRefresh,
+            openInput = file::openInputStream,
+            action = action,
+        )
     }
 
     private fun buildChildUriString(path: Path, resolve: Boolean): String {

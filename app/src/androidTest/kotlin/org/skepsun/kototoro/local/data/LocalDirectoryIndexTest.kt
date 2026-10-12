@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.SharedPreferences
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import androidx.core.content.FileProvider
 import androidx.core.net.toUri
@@ -15,6 +16,7 @@ import com.hippo.unifile.UniFile
 import java.io.File
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+import java.util.zip.ZipInputStream
 import javax.inject.Provider
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.runBlocking
@@ -28,6 +30,8 @@ import org.skepsun.kototoro.core.db.MangaDatabase
 import org.skepsun.kototoro.core.parser.ContentDataRepository
 import org.skepsun.kototoro.core.parser.StoredContentIdentityResolver
 import org.skepsun.kototoro.core.prefs.AppSettings
+import org.skepsun.kototoro.core.util.ext.isContentZipUri
+import org.skepsun.kototoro.core.util.ext.toUnderlyingZipUri
 import org.skepsun.kototoro.local.data.index.LocalContentIndex
 import org.skepsun.kototoro.local.data.input.LocalContentParser
 import org.skepsun.kototoro.local.domain.ContentLock
@@ -110,6 +114,53 @@ class LocalDirectoryIndexTest {
         val content = LocalContentParser(file, context.cacheDir).getContent(withDetails = true)
 
         assertEquals("Embedded title", content.manga.title)
+    }
+
+    @Test
+    fun contentUriArchiveScanningReleasesCopiesAndPreservesIdentity() = runBlocking {
+        val directory = File(root, "scoped-copy-directory").apply { mkdirs() }
+        val archive = createArchive(directory)
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", archive)
+        val parser = LocalContentParser(checkNotNull(UniFile.fromUri(context, uri)), context.cacheDir)
+
+        val first = parser.getContent(withDetails = true)
+        val second = parser.getContent(withDetails = true)
+
+        assertEquals(first.manga.id, second.manga.id)
+        assertEquals(first.manga.chapters?.map { it.id }, second.manga.chapters?.map { it.id })
+        assertTrue(File(context.cacheDir, "local_saf").listFiles().orEmpty().isEmpty())
+        assertTrue(archive.isFile)
+    }
+
+    @Test
+    fun contentUriArchivePagesRemainReadableAfterCacheCleanup() = runBlocking {
+        val directory = File(root, "page-uri-directory").apply { mkdirs() }
+        val archive = createArchive(directory)
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", archive)
+        val parser = LocalContentParser(checkNotNull(UniFile.fromUri(context, uri)), context.cacheDir)
+        val content = parser.getContent(withDetails = true)
+        val pages = parser.getPages(content.manga.chapters.orEmpty().single())
+        storage.clearUnusedLocalArchiveCache()
+
+        assertEquals(1, pages.size)
+        val pageUri = pages.single().url.toUri()
+        assertTrue(pageUri.isContentZipUri())
+        assertEquals(uri, pageUri.toUnderlyingZipUri())
+        val input = checkNotNull(context.contentResolver.openInputStream(pageUri.toUnderlyingZipUri()))
+        val bytes = ZipInputStream(input).use { zip ->
+            var entry = zip.nextEntry
+            while (entry != null && entry.name != pageUri.fragment) entry = zip.nextEntry
+            assertTrue("Original archive entry must remain readable", entry != null)
+            zip.readBytes()
+        }
+        val bitmap = checkNotNull(BitmapFactory.decodeByteArray(bytes, 0, bytes.size))
+        try {
+            assertEquals(32, bitmap.width)
+            assertEquals(48, bitmap.height)
+        } finally {
+            bitmap.recycle()
+        }
+        assertTrue(File(context.cacheDir, "local_saf").listFiles().orEmpty().isEmpty())
     }
 
     @Test

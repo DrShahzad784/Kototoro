@@ -66,7 +66,8 @@ class LocalStorageManager @Inject constructor(
     }
 
     suspend fun computeCacheSize(cache: CacheDir) = withContext(Dispatchers.IO) {
-        getCacheDirsFor(cache).sumOf { it.computeSize() }
+        getCacheDirsFor(cache).sumOf { it.computeSize() } +
+            if (cache == CacheDir.PAGES) File(context.cacheDir, "local_saf").computeSize() else 0L
     }
 
     suspend fun computeStorageSize(kind: StorageContentKind) = withContext(Dispatchers.IO) {
@@ -112,7 +113,12 @@ class LocalStorageManager @Inject constructor(
     }
 
     suspend fun clearCache(cache: CacheDir) = runInterruptible(Dispatchers.IO) {
+        if (cache == CacheDir.PAGES) LocalSafArchiveCache.clearUnused(context.cacheDir)
         getCacheDirsFor(cache).forEach { it.deleteRecursively() }
+    }
+
+    suspend fun clearUnusedLocalArchiveCache() = runInterruptible(Dispatchers.IO) {
+        LocalSafArchiveCache.clearUnused(context.cacheDir)
     }
 
     suspend fun getReadableDirs(): List<File> = runInterruptible(Dispatchers.IO) {
