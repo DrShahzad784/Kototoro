@@ -98,6 +98,10 @@ xcodebuild -project "iosApp/Kototoro.xcodeproj" -scheme Kototoro \
 
 ## 真机 IPA（本地侧载预览）
 
+发行用的默认构建（不含嵌入式 JVM）由本机打包后手动上传：
+`iosApp/Scripts/package-ipa.sh [版本] [构建号]`，版本默认取工程的 `MARKETING_VERSION`，构建号默认为提交数；
+产物为 `iosApp/build/release-ios/Kototoro-<版本>-ios-unsigned.ipa` 与 `.sha256`，需由侧载工具签名。
+
 应用图标位于 `Kototoro/Assets.xcassets/AppIcon.appiconset`，复用 Android 的 Kototoro 图标。
 真机必须使用 `iphoneos` JVM 切片；模拟器的 Arm64 静态库不能直接放进真机应用。
 已准备真实扩展预览后，可复用其 Java 模块、兼容库与来源配置：
