@@ -252,6 +252,24 @@ class DesktopLibraryBackupTest {
         }
     }
 
+    @Test
+    fun `Android history with out-of-range percent restores with normalized progress`() = runBlocking<Unit> {
+        // Real Android backups carry float overshoot and novel offsets in percent; page/scroll stay as written.
+        val rows = listOf(-9L to "1.0000001", -10L to "18844.0").joinToString(",") { (id, percent) ->
+            """{"entity_id":${-id},"anchor_manga_id":$id,"created_at":20,"updated_at":40,"chapter_id":-22,"page":94219,"scroll":10000.0,"percent":$percent,"chapters":1}"""
+        }
+        val file = zip("index" to index, "categories" to categories, "projections" to "[${manga(-9)},${manga(-10).replace("/work", "/novel")}]",
+            "work_history" to "[$rows]")
+        DesktopRuntime.open(directory.resolve("db")).use { runtime ->
+            val backups = DesktopLibraryBackup(runtime.database)
+            backups.preview(file).use { backups.restore(it) }
+            val history = runtime.database.getHistoryDao()
+            assertEquals(1f, history.find(-9)?.percent)
+            assertEquals(-1f, history.find(-10)?.percent)
+            assertEquals(94219, history.find(-10)?.page)
+        }
+    }
+
     private fun manga(id: Long, name: String = source.name) =
         """{"id":$id,"title":"Android 内容","url":"/work","public_url":"https://fixture.invalid/work","cover_url":"","source":"$name","future_field":"ignored"}"""
 

@@ -122,10 +122,13 @@ class LibraryBackup(private val database: MangaDatabase) {
                 if (local == null || remote.updatedAt >= local.updatedAt) database.getFavouritesDao().upsert(remote)
                 restored++
             }
-            suspend fun history(remote: HistoryEntity) {
-                require(remote.mangaId in database.getMangaDao()) { "备份历史缺少对应作品" }
-                require(remote.page >= 0 && remote.scroll.isFinite() && remote.scroll >= 0 && remote.percent.isFinite() &&
-                    remote.percent in -1f..1f && remote.chaptersCount >= 0) { "备份阅读进度无效" }
+            suspend fun history(row: HistoryEntity) {
+                require(row.mangaId in database.getMangaDao()) { "备份历史缺少对应作品" }
+                require(row.page >= 0 && row.scroll.isFinite() && row.scroll >= 0 && row.chaptersCount >= 0) {
+                    "备份阅读进度无效"
+                }
+                // Android writers never validated percent: float overshoot (1.0000001) and novel offsets leak in.
+                val remote = row.copy(percent = normalizeBackupPercent(row.percent))
                 val local = database.getHistoryDao().findIncludingDeleted(remote.mangaId)
                 if (local == null || remote.updatedAt >= local.updatedAt) database.getHistoryDao().upsertSync(remote)
                 restored++
@@ -153,10 +156,8 @@ class LibraryBackup(private val database: MangaDatabase) {
                 for (row in backup.bookmarks) {
                     currentCoroutineContext().ensureActive()
                     require(row.mangaId == backup.manga.id) { "备份书签作品编号不一致" }
-                    require(row.page >= 0 && row.scroll >= 0 && row.percent.isFinite() && row.percent in -1f..1f) {
-                        "备份书签位置无效"
-                    }
-                    val remote = row.toEntity()
+                    require(row.page >= 0 && row.scroll >= 0) { "备份书签位置无效" }
+                    val remote = row.toEntity().let { it.copy(percent = normalizeBackupPercent(it.percent)) }
                     val local = database.getBookmarksDao().find(remote.mangaId, remote.pageId)
                     require(local == null || local.chapterId == remote.chapterId && local.page == remote.page) {
                         "备份书签编号与本地页面冲突"
@@ -205,6 +206,13 @@ class LibraryBackup(private val database: MangaDatabase) {
         }
     }
 
+    private fun normalizeBackupPercent(percent: Float): Float = when {
+        !percent.isFinite() -> BACKUP_PROGRESS_NONE
+        percent in -1f..1f -> percent
+        percent > 1f && percent <= 1f + PERCENT_OVERSHOOT -> 1f
+        else -> BACKUP_PROGRESS_NONE
+    }
+
     private suspend fun saveContent(backup: ContentBackup, tagBackups: Set<TagBackup> = backup.tags) {
         val candidate = backup.toEntity()
         val local = database.getMangaDao().find(candidate.id)?.manga
@@ -226,6 +234,8 @@ class LibraryBackup(private val database: MangaDatabase) {
     }
 
     companion object {
+        private const val PERCENT_OVERSHOOT = 0.1f
+
         val supportedSections = setOf(BackupSection.CONTENTS, BackupSection.CATEGORIES, BackupSection.FAVOURITES,
             BackupSection.HISTORY, BackupSection.SOURCES, BackupSection.WORK_FAVOURITES, BackupSection.WORK_HISTORY,
             BackupSection.BOOKMARKS, BackupSection.STATS, BackupSection.WORK_STATS, BackupSection.SOURCE_ORIGINS,
