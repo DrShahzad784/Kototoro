@@ -54,6 +54,10 @@ import org.skepsun.kototoro.explore.ui.model.BrowseGroupTab
 import org.skepsun.kototoro.explore.data.ContentSourcesRepository
 import org.skepsun.kototoro.explore.data.SourcePresetsRepository
 import org.skepsun.kototoro.favourites.domain.GlobalFavoritesState
+import org.skepsun.kototoro.favourites.domain.FavouritesRepository
+import org.skepsun.kototoro.history.data.HistoryRepository
+import org.skepsun.kototoro.local.data.LocalMangaRepository
+import org.skepsun.kototoro.suggestions.domain.SuggestionRepository
 import org.skepsun.kototoro.favourites.ui.compose.FavoritesFilterPanelContent
 import org.skepsun.kototoro.list.domain.ListFilterOption
 import org.skepsun.kototoro.list.ui.model.QuickFilter
@@ -90,6 +94,18 @@ class FavoritesFilterPanelPersistenceTest {
 
     @Inject
     lateinit var preferredSiteProvider: PreferredTrackingSiteProvider
+
+    @Inject
+    lateinit var historyRepository: HistoryRepository
+
+    @Inject
+    lateinit var favouritesRepository: FavouritesRepository
+
+    @Inject
+    lateinit var localMangaRepository: LocalMangaRepository
+
+    @Inject
+    lateinit var suggestionRepository: SuggestionRepository
 
     @Before
     fun setUp() {
@@ -130,6 +146,7 @@ class FavoritesFilterPanelPersistenceTest {
                 val suggestions = SearchSuggestionViewModel(
                     searchRepository, settings, sourcesRepository, presetsRepository,
                     sourceTypeIdentifier, GlobalFavoritesState(settings), discoveryService, preferredSiteProvider,
+                    historyRepository, favouritesRepository, localMangaRepository, suggestionRepository,
                 )
                 activity.viewModelStore.put("filter-panel-fixture", suggestions)
                 val chrome = MainChromeController(settings, suggestions) { activity.window.decorView }
