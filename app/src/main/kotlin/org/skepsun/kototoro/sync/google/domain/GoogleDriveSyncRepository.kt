@@ -20,6 +20,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import org.skepsun.kototoro.BuildConfig
+import org.skepsun.kototoro.R
 import org.skepsun.kototoro.core.db.MangaDatabase
 import org.skepsun.kototoro.core.db.entity.ExternalExtensionRepoEntity
 import org.skepsun.kototoro.core.db.entity.JsonSourceEntity
@@ -125,11 +126,7 @@ class GoogleDriveSyncRepository @Inject constructor(
         settings.lastSyncAttemptTimestamp = System.currentTimeMillis()
         return try {
             val token = auth.requireAccessToken()
-            performSync(token)
-            settings.lastSyncTimestamp = System.currentTimeMillis()
-            settings.lastSyncError = null
-            settings.isDirty = false
-            GoogleDriveSyncResult.Success
+            finishSync(performSync(token))
         } catch (e: GoogleDriveSyncAuthorizationException) {
             settings.lastSyncError = e.message
             GoogleDriveSyncResult.AuthorizationRequired(e)
@@ -193,11 +190,7 @@ class GoogleDriveSyncRepository @Inject constructor(
         settings.lastSyncAttemptTimestamp = System.currentTimeMillis()
         return try {
             val token = auth.requireAccessToken()
-            importLegacyRemoteData(token)
-            settings.lastSyncTimestamp = System.currentTimeMillis()
-            settings.lastSyncError = null
-            settings.isDirty = false
-            GoogleDriveSyncResult.Success
+            finishSync(importLegacyRemoteData(token))
         } catch (e: GoogleDriveSyncAuthorizationException) {
             settings.lastSyncError = e.message
             GoogleDriveSyncResult.AuthorizationRequired(e)
@@ -232,7 +225,17 @@ class GoogleDriveSyncRepository @Inject constructor(
         settings.clearAccount()
     }
 
-    private suspend fun performSync(token: String) {
+    private fun finishSync(unrestoredExtensions: List<String>): GoogleDriveSyncResult {
+        settings.lastSyncTimestamp = System.currentTimeMillis()
+        settings.isDirty = false
+        val message = unrestoredExtensions.takeIf { it.isNotEmpty() }?.let {
+            context.getString(R.string.sync_extensions_restore_incomplete, it.distinct().joinToString(", "))
+        }
+        settings.lastSyncError = message
+        return if (message == null) GoogleDriveSyncResult.Success else GoogleDriveSyncResult.Error(message, retryable = false)
+    }
+
+    private suspend fun performSync(token: String): List<String> {
         repairAfterSync()
         var attempt = 0
         while (true) {
@@ -276,7 +279,7 @@ class GoogleDriveSyncRepository @Inject constructor(
                 GoogleDriveSyncMerger.mergeSnapshots(local, remote)
             }
             Log.d(TAG, "sync merged=${merged.debugSummary()}")
-            runSyncStep("apply database") {
+            val unrestoredExtensions = runSyncStep("apply database") {
                 applyToDatabase(merged)
             }
             runSyncStep("repair after sync") {
@@ -287,7 +290,7 @@ class GoogleDriveSyncRepository @Inject constructor(
             }
             Log.d(TAG, "sync applied=${applied.debugSummary()} ${database.localDatabaseSummary()}")
             val compactedUpload = runSyncStep("compact upload snapshot") {
-                GoogleDriveSyncMerger.mergeSnapshots(applied, null)
+                GoogleDriveSyncMerger.buildUploadSnapshot(applied, merged)
             }
             Log.d(TAG, "sync upload=${compactedUpload.debugSummary()}")
             val upload = compactedUpload.copyForUpload(syncedAt = System.currentTimeMillis())
@@ -307,11 +310,11 @@ class GoogleDriveSyncRepository @Inject constructor(
             files.filter { it.id != fileId && it.id in decodedIds }.forEach { duplicate ->
                 deleteRemoteFileBestEffort(token, duplicate.id)
             }
-            return
+            return unrestoredExtensions
         }
     }
 
-    private suspend fun importLegacyRemoteData(token: String) {
+    private suspend fun importLegacyRemoteData(token: String): List<String> {
         val files = runSyncStep("list legacy drive files") {
             api.findLegacySyncFiles(token)
         }
@@ -326,16 +329,16 @@ class GoogleDriveSyncRepository @Inject constructor(
         }
         val remote = runSyncStep("merge legacy remote snapshots") {
             GoogleDriveSyncMerger.combine(decoded)
-        } ?: return
+        } ?: return emptyList()
         Log.d(TAG, "legacy import remote=${remote.debugSummary()} files=${files.size}")
-        runSyncStep("apply legacy remote snapshot") {
+        val unrestoredExtensions = runSyncStep("apply legacy remote snapshot") {
             applyToDatabase(remote)
         }
         runSyncStep("repair after sync") {
             repairAfterSync()
         }
         val upload = runSyncStep("build current snapshot after legacy import") {
-            GoogleDriveSyncMerger.mergeSnapshots(buildLocalSnapshot(), null)
+            GoogleDriveSyncMerger.buildUploadSnapshot(buildLocalSnapshot(), remote)
                 .copyForUpload(syncedAt = System.currentTimeMillis())
         }
         Log.d(TAG, "legacy import upload=${upload.debugSummary()} ${database.localDatabaseSummary()}")
@@ -350,6 +353,7 @@ class GoogleDriveSyncRepository @Inject constructor(
         currentFiles.filter { it.id != fileId }.forEach { duplicate ->
             deleteRemoteFileBestEffort(token, duplicate.id)
         }
+        return unrestoredExtensions
     }
 
     private suspend fun repairAfterSync() {
@@ -426,7 +430,7 @@ class GoogleDriveSyncRepository @Inject constructor(
             .flatMap { chunk -> getMangaDao().findEntitiesByIds(chunk) }
     }
 
-    private suspend fun applyToDatabase(snapshot: GoogleDriveSyncSnapshot) {
+    private suspend fun applyToDatabase(snapshot: GoogleDriveSyncSnapshot): List<String> {
         val norm = snapshot.normalizeToContentV3()
         database.withTransaction {
             val contentImport = runSyncStep("apply content") {
@@ -507,12 +511,13 @@ class GoogleDriveSyncRepository @Inject constructor(
                 database.pruneLocalSyncResidue()
             }
         }
-        runSyncStep("apply extension packages") {
+        val unrestoredExtensions = runSyncStep("apply extension packages") {
             restoreExtensionPackages(norm)
         }
         runSyncStep("normalize track feed state") {
             database.normalizeTrackFeedState()
         }
+        return unrestoredExtensions
     }
 
     private suspend fun MangaDatabase.pruneLocalSyncResidue() {
@@ -864,8 +869,9 @@ class GoogleDriveSyncRepository @Inject constructor(
         }
     }
 
-    private suspend fun restoreExtensionPackages(snapshot: GoogleDriveSyncSnapshot) {
-        if (snapshot.extensions.isEmpty()) return
+    internal suspend fun restoreExtensionPackages(snapshot: GoogleDriveSyncSnapshot): List<String> {
+        if (snapshot.extensions.isEmpty()) return emptyList()
+        val unrestored = mutableListOf<String>()
         var hasJarUpdated = false
         var hasCloudstreamUpdated = false
         var hasMihonUpdated = false
@@ -875,9 +881,17 @@ class GoogleDriveSyncRepository @Inject constructor(
 
         snapshot.extensions.forEach { ext ->
             if (!ext.isPayloadIncluded || ext.payloadBase64.isNullOrBlank()) {
+                if (!isExtensionInstalled(ext)) unrestored += ext.name
                 return@forEach
             }
-            val bytes = runCatching { Base64.getDecoder().decode(ext.payloadBase64) }.getOrNull() ?: return@forEach
+            val bytes = runCatching { Base64.getDecoder().decode(ext.payloadBase64) }.getOrNull()
+            if (bytes == null || bytes.isEmpty() ||
+                bytes.size > MAX_SYNC_PACKAGE_SIZE_BYTES ||
+                (ext.sizeBytes > 0 && bytes.size.toLong() != ext.sizeBytes)
+            ) {
+                if (!isExtensionInstalled(ext)) unrestored += ext.name
+                return@forEach
+            }
             when (ext.kind.lowercase()) {
                 "jar" -> {
                     runCatching {
@@ -887,7 +901,7 @@ class GoogleDriveSyncRepository @Inject constructor(
                         val localVersion = jarPrefs.getLong(ext.packageId, -1L)
                         val remoteVersion = ext.versionCode ?: 0L
                         if (!targetFile.exists() || targetFile.length() == 0L || remoteVersion > localVersion) {
-                            targetFile.writeBytes(bytes)
+                            writeSyncedExtension(targetFile, bytes, ext.sizeBytes)
                             jarPrefs.edit()
                                 .putLong(ext.packageId, remoteVersion)
                                 .apply {
@@ -896,7 +910,11 @@ class GoogleDriveSyncRepository @Inject constructor(
                                 .apply()
                             hasJarUpdated = true
                         }
-                    }.onFailure { Log.e(TAG, "Failed to restore jar extension ${ext.packageId}", it) }
+                    }.onFailure {
+                        if (it is CancellationException) throw it
+                        unrestored += ext.name
+                        Log.e(TAG, "Failed to restore jar extension ${ext.packageId}", it)
+                    }
                 }
                 "cloudstream" -> {
                     runCatching {
@@ -907,7 +925,7 @@ class GoogleDriveSyncRepository @Inject constructor(
                         val localVersion = csPrefs.getLong(ext.packageId, -1L)
                         val remoteVersion = ext.versionCode ?: 0L
                         if (!targetFile.exists() || targetFile.length() == 0L || remoteVersion > localVersion) {
-                            targetFile.writeBytes(bytes)
+                            writeSyncedExtension(targetFile, bytes, ext.sizeBytes)
                             csPrefs.edit()
                                 .putLong(ext.packageId, remoteVersion)
                                 .putString("${ext.packageId}:name", ext.name)
@@ -918,7 +936,11 @@ class GoogleDriveSyncRepository @Inject constructor(
                                 .apply()
                             hasCloudstreamUpdated = true
                         }
-                    }.onFailure { Log.e(TAG, "Failed to restore cloudstream extension ${ext.packageId}", it) }
+                    }.onFailure {
+                        if (it is CancellationException) throw it
+                        unrestored += ext.name
+                        Log.e(TAG, "Failed to restore cloudstream extension ${ext.packageId}", it)
+                    }
                 }
                 "mihon", "aniyomi", "ireader", "tsundoku" -> {
                     runCatching {
@@ -946,43 +968,77 @@ class GoogleDriveSyncRepository @Inject constructor(
                             return@runCatching
                         }
 
-                        // 3. Otherwise store/update managed APK
-                        val tempFile = File.createTempFile("sync_ext_${ext.packageId}", ".apk", context.cacheDir)
-                        try {
-                            tempFile.writeBytes(bytes)
-                            LocalApkExtensionSupport.storeManagedApk(context, ecosystem, ext.packageId, tempFile)
-                            when (ecosystem) {
-                                "mihon" -> hasMihonUpdated = true
-                                "aniyomi" -> hasAniyomiUpdated = true
-                                "ireader" -> hasIReaderUpdated = true
-                                "tsundoku" -> hasTsundokuUpdated = true
-                            }
-                        } finally {
-                            tempFile.delete()
+                        // 3. Publish a complete, read-only APK so startup scans never see a partial file.
+                        writeSyncedExtension(targetFile, bytes, ext.sizeBytes, readOnly = true)
+                        when (ecosystem) {
+                            "mihon" -> hasMihonUpdated = true
+                            "aniyomi" -> hasAniyomiUpdated = true
+                            "ireader" -> hasIReaderUpdated = true
+                            "tsundoku" -> hasTsundokuUpdated = true
                         }
-                    }.onFailure { Log.e(TAG, "Failed to restore apk extension ${ext.packageId}", it) }
+                    }.onFailure {
+                        if (it is CancellationException) throw it
+                        unrestored += ext.name
+                        Log.e(TAG, "Failed to restore apk extension ${ext.packageId}", it)
+                    }
                 }
+                else -> unrestored += ext.name
             }
         }
 
+        suspend fun reload(kind: String, action: suspend () -> Unit) {
+            try {
+                action()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                unrestored += snapshot.extensions.filter { it.kind.equals(kind, ignoreCase = true) }.map { it.name }
+                Log.e(TAG, "Failed to reload $kind extensions after sync", e)
+            }
+        }
         if (hasJarUpdated) {
-            runCatching { GlobalExtensionManager.initialize(context) }
+            reload("jar") { GlobalExtensionManager.initialize(context) }
         }
         if (hasCloudstreamUpdated) {
-            runCatching { cloudstreamRuntimeManager.get().initialize() }
+            reload("cloudstream") { cloudstreamRuntimeManager.get().initialize() }
         }
         if (hasMihonUpdated) {
-            runCatching { mihonExtensionManager.get().loadExtensions() }
+            reload("mihon") { mihonExtensionManager.get().loadExtensions() }
         }
         if (hasAniyomiUpdated) {
-            runCatching { aniyomiExtensionManager.get().loadExtensions() }
+            reload("aniyomi") { aniyomiExtensionManager.get().loadExtensions() }
         }
         if (hasIReaderUpdated) {
-            runCatching { ireaderExtensionManager.get().loadExtensions() }
+            reload("ireader") { ireaderExtensionManager.get().loadExtensions() }
         }
         if (hasTsundokuUpdated) {
-            runCatching { tsundokuExtensionManager.get().loadExtensions() }
+            reload("tsundoku") { tsundokuExtensionManager.get().loadExtensions() }
         }
+        return unrestored.distinct()
+    }
+
+    private fun isExtensionInstalled(ext: SyncExtensionPackage): Boolean {
+        val version = ext.versionCode ?: 0L
+        val kind = ext.kind.lowercase()
+        if (kind == "jar" || kind == "cloudstream") {
+            val directory = if (kind == "jar") File(context.filesDir, "plugins")
+                else File(File(context.filesDir, "cloudstream"), "plugins")
+            val file = File(directory, ext.fileName ?: "${ext.packageId}.${if (kind == "jar") "jar" else "cs3"}")
+            val prefs = context.getSharedPreferences(
+                if (kind == "jar") "jar_plugin_versions" else "cloudstream_plugin_versions",
+                Context.MODE_PRIVATE,
+            )
+            return file.isFile && file.length() > 0 && prefs.getLong(ext.packageId, -1L) >= version
+        }
+        if (kind !in setOf("mihon", "aniyomi", "ireader", "tsundoku")) return false
+        val systemInfo = ExternalExtensionLoaderSupport.getPackageInfoOrNull(context.packageManager, ext.packageId)
+        if (systemInfo != null && PackageInfoCompat.getLongVersionCode(systemInfo) >= version) return true
+        val root = LocalApkExtensionSupport.getManagedExtensionsDir(context, kind)
+        val file = File(File(root, ext.packageId), "${ext.packageId}.apk")
+        val archiveInfo = if (file.isFile && file.length() > 0) {
+            ExternalExtensionLoaderSupport.getPackageArchiveInfoOrNull(context.packageManager, file)
+        } else null
+        return archiveInfo != null && PackageInfoCompat.getLongVersionCode(archiveInfo) >= version
     }
 
     @Serializable

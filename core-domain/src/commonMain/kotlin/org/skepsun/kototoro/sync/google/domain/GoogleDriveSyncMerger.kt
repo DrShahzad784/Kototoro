@@ -17,6 +17,11 @@ import org.skepsun.kototoro.tracker.data.isNewerThan
 
 object GoogleDriveSyncMerger {
 
+    fun buildUploadSnapshot(
+        applied: GoogleDriveSyncSnapshot,
+        merged: GoogleDriveSyncSnapshot,
+    ): GoogleDriveSyncSnapshot = compactSnapshot(applied.normalizeToContentV3(), merged.extensions)
+
     fun combine(snapshots: List<GoogleDriveSyncSnapshot>): GoogleDriveSyncSnapshot? = when {
         snapshots.isEmpty() -> null
         snapshots.size == 1 -> compactSnapshot(snapshots.single().normalizeToContentV3())
@@ -65,7 +70,10 @@ object GoogleDriveSyncMerger {
         else -> local
     }
 
-    private fun compactSnapshot(snapshot: GoogleDriveSyncSnapshot): GoogleDriveSyncSnapshot {
+    private fun compactSnapshot(
+        snapshot: GoogleDriveSyncSnapshot,
+        retainedExtensions: List<SyncExtensionPackage> = emptyList(),
+    ): GoogleDriveSyncSnapshot {
         val norm = snapshot.normalizeToContentV3()
         // 1. Content: rows sharing a content identity (same source + url/publicUrl) are one
         // manga, even when older snapshots carry them under different ids. Keep the lowest id
@@ -155,7 +163,8 @@ object GoogleDriveSyncMerger {
             .values
             .map(::mergeJsonSources)
 
-        val compactPackages = norm.extensions
+        // Missing local files may mean an incomplete restore, not an explicit uninstall.
+        val compactPackages = (norm.extensions + retainedExtensions)
             .groupBy { it.packageId }
             .values
             .map(::mergeExtensionPackages)
@@ -257,10 +266,8 @@ object GoogleDriveSyncMerger {
 
     private fun mergeExtensionPackages(items: List<SyncExtensionPackage>): SyncExtensionPackage {
         if (items.size == 1) return items.single()
-        val withPayload = items.filter { it.isPayloadIncluded && !it.payloadBase64.isNullOrBlank() }
-        if (withPayload.isNotEmpty()) {
-            return withPayload.maxByOrNull { it.versionCode ?: 0L } ?: withPayload.first()
-        }
-        return items.maxByOrNull { it.versionCode ?: 0L } ?: items.first()
+        val newestVersion = items.maxOf { it.versionCode ?: 0L }
+        val newest = items.filter { (it.versionCode ?: 0L) == newestVersion }
+        return newest.firstOrNull { it.isPayloadIncluded && !it.payloadBase64.isNullOrBlank() } ?: newest.first()
     }
 }

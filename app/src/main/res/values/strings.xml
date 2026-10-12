@@ -2325,6 +2325,7 @@
     <string name="sync_webdav_enable">Enable WebDAV backup</string>
     <string name="sync_webdav_enable_summary">Upload and restore full backup packages manually or during the daily backup task.</string>
     <string name="google_drive_sync">Google Drive sync</string>
+    <string name="sync_extensions_restore_incomplete">Library synced. These extensions could not be restored: %1$s. Install them again from their repositories; their cloud records have been kept.</string>
     <string name="sync_google_drive_enable">Enable Google Drive sync</string>
     <string name="sync_google_drive_enable_summary">Use Google Drive as the active sync backend. Turning it on disables WebDAV sync actions to avoid mixing remote snapshots. Your Google sign-in is kept when this is off.</string>
     <string name="sync_backend_switch_google_drive_title">Switch to Google Drive sync?</string>

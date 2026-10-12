@@ -3868,4 +3868,5 @@ SHA-256 指纹:
     <string name="avif_animation_downsampling_summary">缩小分辨率以在预算内继续播放。默认关闭以保留原始分辨率，两个播放帧缓冲超出预算时仅显示首帧；若单帧也无法容纳，请提高预算。</string>
     <string name="avif_animation_recommended">使用推荐的 AVIF 设置</string>
     <string name="avif_animation_recommended_summary">根据本机 RAM 和应用内存上限，使用自动 %1$d MiB 预算，并保留原始分辨率。</string>
+    <string name="sync_extensions_restore_incomplete">书库已同步。以下扩展未能恢复：%1$s。请从扩展仓库重新安装，云端记录已保留。</string>
 </resources>

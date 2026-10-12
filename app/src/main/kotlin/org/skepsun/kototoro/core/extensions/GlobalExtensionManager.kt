@@ -61,6 +61,7 @@ object GlobalExtensionManager {
     private val allLoadedContentSources = mutableListOf<PluginContentSource>()
     private var prefsListener: SharedPreferences.OnSharedPreferenceChangeListener? = null
 
+    @Synchronized
     fun initialize(context: Context) {
         val pluginDir = File(context.filesDir, "plugins")
         val plugins = JarExtensionLoader.loadFromDirectory(context, pluginDir)
@@ -100,8 +101,10 @@ object GlobalExtensionManager {
         if (prefsListener == null) {
             prefsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
                 if (key == "jar_priority_order") {
-                    applyDeduplication(prefs)
-                    publishRegistryUpdate()
+                    synchronized(this) {
+                        applyDeduplication(prefs)
+                        publishRegistryUpdate()
+                    }
                 }
             }
             prefs.registerOnSharedPreferenceChangeListener(prefsListener)
@@ -133,6 +136,7 @@ object GlobalExtensionManager {
         _updates.tryEmit(Unit)
     }
 
+    @Synchronized
     fun getMangaParser(source: MangaSource, context: MangaLoaderContext): MangaParser {
         val pluginSource = source as? PluginMangaSource ?:
             _mangaSources.value.find { it.originalSource == source || it.name == source.name }
@@ -141,6 +145,7 @@ object GlobalExtensionManager {
         return JarExtensionLoader.instantiateMangaParser(plugin, pluginSource.originalSource, context)
     }
 
+    @Synchronized
     fun getContentParser(source: ContentSource, context: ContentLoaderContext): ContentParser {
         val pluginSource = source as? PluginContentSource ?:
             _contentSources.value.find { it.originalSource == source || it.name == source.name }
