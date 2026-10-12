@@ -14,7 +14,9 @@
 每个 JVM 只允许一个兼容平台生命周期；关闭后重开须重启进程，扩展的常驻会话由 source-host 持有。
 Close 尝试回收 HTTP 客户端、CookieHandler、容器和线程，最后释放偏好桥。
 
-WKWebView、系统服务、Android 资源、包管理、图形与 JavaScript 仍未实现，相关调用明确 unsupported。
-来自上游 Mobile shim 的 native 方法也尚未注册，不宣称所有这类调用都可用。
+WKWebView 与 CookieManager 由本模块的 `IosWebKit`、`IosWebViewProvider` 和 `IosCookieManager` 接到 Swift。
+图形、JavaScript、PDF、常用 ICU、系统资源和压缩由项目自写的 [`mihon-ios-shims`](../mihon-ios-shims/README.md)
+提供，JNI 在 VM 启动时注册，不加载 TachiyomiAzIOS 的 shim JAR 或 boot shim。
+包管理、未列出的系统服务以及复杂 Android framework API 仍明确 unsupported；支持边界见该模块 README。
 本模块已验证再漫画 1.6.0 的转换/枚举/公开列表、详情/封面/章节及首章图片阅读；
 默认预览和真实 APK 预览均非正式发行，S3 与真机门槛待完成。

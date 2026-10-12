@@ -107,9 +107,9 @@ final class NativeSourceTransport: IosSourceTransport {
         var options = ["-Djava.io.tmpdir=\(FileManager.default.temporaryDirectory.path)",
                        "-Duser.home=\(data.path)",
                        "-Xmx\(Self.heapMegabytes)m"]
-        let bootShims = runtime.appendingPathComponent("boot-shims.jar")
-        if FileManager.default.fileExists(atPath: bootShims.path) {
-            options.append("-Xbootclasspath/a:\(bootShims.path)")
+        // Development: host-side stack traces of failed source calls, which the protocol does not carry.
+        if ProcessInfo.processInfo.environment["KOTOTORO_SOURCE_DIAGNOSTICS"] != nil {
+            options.append("-Dkototoro.source.diagnostics=file:\(data.appendingPathComponent("source-failures.log").path)")
         }
         let optionStrings = options.map { strdup($0) }
         defer { optionStrings.forEach { free($0) } }
@@ -124,6 +124,8 @@ final class NativeSourceTransport: IosSourceTransport {
         }
         defer { ktr_free(error) }
         guard status == 0 else { throw nativeFailure(error) }
+        // Extensions' Android WebViews run on WKWebView; the platform adapter installs the Java side on open.
+        ExtensionWebKit.install()
 
         let configDirectory = runtime.appendingPathComponent("sources", isDirectory: true)
         let configURL = configDirectory.appendingPathComponent("config.json")
@@ -147,6 +149,9 @@ final class NativeSourceTransport: IosSourceTransport {
         }
         // Swift and the host share one image directory, irrespective of a preview's relative config path.
         config["imageDirectory"] = "images"
+        // Start-up registers verified extensions from their cached source lists; each is constructed on first use,
+        // so switched-off sources never run their extension.
+        config["catalogDirectory"] = "catalogs/extensions"
         let json = String(decoding: try JSONSerialization.data(withJSONObject: config), as: UTF8.self)
         let configuration = Array(json.utf16)
         let directory = Array(data.path.utf16)

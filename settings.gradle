@@ -92,6 +92,7 @@ rootProject.name = "Kototoro"
 include ':ios-shared'
 if (providers.gradleProperty('withMihonIosCompat').map { it != 'false' }.getOrElse(false)) {
     include ':mihon-ios-compat'
+    include ':mihon-ios-shims'
 }
 
 // 使用远程 DanmakuRenderEngine（本地工程 AGP 4.2.2 与当前 Gradle 不兼容）

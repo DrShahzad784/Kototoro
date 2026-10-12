@@ -5372,14 +5372,17 @@ JAR 解析器（kototoro/kotatsu parsers）按能力新增年份区间、原作�
 下方，按预设模糊（`blur% × 18pt`）、顶部不透明度与渐隐范围遮罩（同 Android 的 0.18–0.82 起点、0.96 结束、
 0.35/0.70 中间点）融入分组背景。三种预设（清晰/均衡/柔和）与两种布局沿用 Android 数值：顶部横幅（半屏，默认）
 与全屏背景。顶部横幅随列表滚动移出、下拉时拉伸；可选缓慢平移缩放动画（系统“减弱动态效果”时关闭）。
-滚动偏移来自 `onScrollGeometryChange`；导航栏标题在头部滚出后才显示。头部为横幅预留 48pt（横幅高约 0.95 屏宽，上限半屏），标题信息叠在
-渐隐区。设置页新增“详情页”分组（开关/布局/效果/动画/跟随滚动，`@AppStorage`）；关闭时回退到原模糊背景。
+滚动偏移来自 `onScrollGeometryChange`；导航栏标题在头部滚出后才显示。头部为横幅预留 48pt，标题信息叠在渐隐区。
+2026-10-12 调整顶部横幅：通过封面卡片的布局 anchor 取得底部位置，结合滚动偏移还原静止高度，
+使 0.96 的渐隐结束点对齐卡片下边缘，替代按屏宽估算高度；列表回收头部时保留最近的测量值。
+设置页新增“详情页”分组（开关/布局/效果/动画/跟随滚动，`@AppStorage`）；关闭时回退到原模糊背景。
 `CoverImage` 新增无占位的装饰模式；同一封面的并发请求（详情缩略图与全景）合并为一次，所有等待者离开后才取消，
 保留网格快速滚动时退出封面队列的行为。
 
 **验证**：真实扩展预览 `testDetailsPanoramaHeader`（MangaDex 详情静止/滚动/回顶截图已检查）与
 `testJarMangaPagesRender` 通过；JVM fixture `SourceRuntimeTests` 3 项通过。章节行因头部变高而落在首屏之下，
 UI 测试统一改用 `revealChapter`（详情加载后滚动直到首个章节行出现）。
+此次下边缘调整的同一 UI 回归再次通过，静止、滚动和回顶截图已检查。
 
 **边界**：封面沿用 600px 解码结果，清晰预设下大屏放大会略软；滚动联动在真机上的帧率待验收。
 
@@ -5890,3 +5893,67 @@ WKWebView（使用来源的 UA）加载站点，最多等待 20 秒；拿到 `cf
 - Mihon 域名改写对真实镜像站的联网验证（单测只验证了请求改写）；
 - 本地导入暂不支持视频文件和 PDF/CBR/7z；
 - 同步（按要求暂缓）。
+
+## 116. 独立 iOS JVM shim 与源码运行时构建（2026-10-12）
+
+沿用用户选择的自行实现方向，新增可选 `mihon-ios-shims`，替换 TachiyomiAzIOS 的 Mobile shim JAR。
+WebView/CookieManager 使用 Kototoro 的 `IosWebKit` 协议；其他操作经项目自写的 `KototoroNative.mm`
+注册到 `IosNative`，由 ImageIO、CoreText、CoreGraphics 和 JavaScriptCore 执行。
+
+Java/Kotlin 侧提供 Bitmap/Canvas/Paint/文字折行、PDF 与文件描述符、QuickJs 接口、常用 ICU、流式 JsonReader、
+zstd、系统资源/内存/时钟及网络配置适配。实现和支持边界见
+[`mihon-ios-shims/README.md`](../../mihon-ios-shims/README.md)。不宣称完整 Android framework、ICU 排序一致性
+或 QuickJS 字节码兼容；未实现的高级操作明确失败。
+
+构建使用固定 OpenJDK Mobile 的独立源码树和项目的 `openjdk-ios.py`，不读取 TachiyomiAZ 的补丁、导出表或
+符号保留代码。760 个原生入口（含 JNI/JNU helper）从本次静态库生成；Java 模块、时区与证书数据来自同源构建。
+主机 JDK 26 仅作工具，使用 Mobile 修订的 JlinkTask 并禁用 JLI 预生成。运行时包含 java.base、java.xml、
+java.logging、jdk.unsupported 和 jdk.localedata，不加载 boot shim。
+
+实际模拟器验证发现并修复以下运行时问题：
+
+- Mobile 原始 iOS 分支使用 `Documents/lib/modules`；适配现在明确作用于 Apple 分支，并统一使用
+  应用传入的 `JAVA_HOME/lib/modules`。
+- 普通命令行二进制的可见符号掩盖了 JNU helper 遗漏；App 链接后报 `JNU_NewStringPlatform missing`。
+  符号生成器已补齐 JNI/JNU 入口，`test-jvm-simulator.py` 使用 `-no_exported_symbols` 保留真实失败条件。
+- Mobile 构建生成的 `PlatformProps` 把 iOS 传给没有 IOS 成员的 `OperatingSystem` 枚举，导致 JAR
+  资源读取初始化失败。自写适配将 iOS 映射到 Core JDK 的 MACOS 分支；回归实际打开 shim JAR
+  内的 class 资源并检查 CAFEBABE 文件头，已确认修复前失败、修复后通过。
+
+预览把 `00-kototoro-ios-shims.jar` 排在第一位，拒绝旧 boot profile 和 `app/tachiaz/` 类；产物审计确认
+没有这些类或 TachiaZ 原生符号。AndroidCompat/Suwayomi 与基础依赖仍从固定摘要的发行容器提取，保留各自
+来源及许可，自行实现 shim 不重新许可这些依赖。`runtime-origin.json` 记录构建来源，`inventory.json` 记录摘要。
+
+已验证：shim 测试 15 项全部运行并通过；iOS 适配 2 项、source-host 102 项通过；dex-convert 18 项中
+15 项通过、3 项条件跳过。macOS 与隐藏符号配置下的模拟器 Zero transport 回归通过，覆盖 Unicode、
+64 位 ID、20 次跨线程调用、异常恢复与关闭。模拟器原生 shim 回归通过 JavaScriptCore、UTF-16、ImageIO
+像素/透明度、CoreText 和 JAR 资源流。默认 iOS 构建与真实 API 预览 build-for-testing 通过。
+独立 fixture 的完整 App UI 回归通过，覆盖源枚举、进程重启、详情/章节、图片、阅读模式、进度与下载。
+测试明确设置阅读方向，避免持久化阅读偏好影响页码断言。
+
+新 shim 的 Mac JVM 在线探测通过：再漫画列表/详情/392 章/首章图片，AllNovelFull 列表/2166 章/正文，
+AnimeGG 列表/1165 集/视频地址。再漫画真实 APK 的模拟器 App UI 回归通过列表、详情、章节和图片阅读；
+Aniyomi AnimeGG 的实际播放进度、JAR MangaDex 的图片和 Tsundoku AllNovelFull 的小说正文均通过 App UI 回归。
+Comix 样本属于 Mihon APK 生态，不是 JAR 插件里的 Comix；现已对齐用户 Android 环境的 1.6.46，
+固定官方发行 `b5d2cd5` 与 SHA-256。此前 1.6.45 的列表通过、章节解码捕获超时，不能用该结果推断 1.6.46。
+1.6.46 在正常 WebView 桥流程下通过完整 App UI 回归：列表、详情、章节和真实图片；临时响应字段与
+安全上下文探针均已移除。与 1.6.45 相比，该样本的章节脚本由并发翻页改为带延迟的逐页读取，
+版本差异已在转换产物中直接核对，不把旧版失败归为 JAR 插件 Comix 或新 shim 的通用缺陷。
+
+## 117. iOS 启动只加载被使用的来源（2026-10-12）
+
+模拟器冷启动时宿主侧约 12.8 s：平台 1.4 s、13 个扩展 JAR 1.9 s、解析器插件 9.3 s（k-parsers-r 5.4 s、UMA 2.4 s、
+kototoro-parsers 1.4 s）。插件耗时来自仅解释执行的 JVM 对整个 JAR 做 SHA-256、逐个读取类头，并初始化上千常量的来源枚举；
+启动阶段其实只需要来源清单。
+
+- `ParserPluginRegistry(catalogDirectory)` 与 `MihonJarRegistry(catalogDirectory)`：首次完整加载并校验后，按产物 SHA-256
+  缓存来源清单（插件为制表符分隔文本，扩展为 `LoadedMihonExtension` JSON）。之后启动命中缓存只注册来源，不打开 JAR、
+  不执行扩展构造；某个来源第一次被调用时才校验哈希、加载类并构造，且必须与缓存的架构/来源一致，否则这次调用失败、下次重试。
+  安装与更新始终完整构造；缓存损坏或身份不符时回退完整加载并重写。
+- 按需加载在注册表锁外按插件/扩展各自加锁，大插件加载不阻塞其他来源；持久化回调失败仍报告为安装失败。
+- 关闭的来源不在浏览页出现、不会被调用，所在插件/扩展因此不会加载。iOS 打开两处缓存：扩展用会话配置
+  `catalogDirectory = catalogs/extensions`，插件在 `compat/parser-catalogs`；桌面默认不开启。
+- 实测（模拟器，第二次冷启动）：扩展 JAR 2252 → 21 ms，解析器插件 9531 → 144 ms；浏览页显示的已启用来源随后在后台加载
+  （kototoro-parsers 约 2.9 s、再漫画 0.25 s），k-parsers-r 与 UMA 未被加载。
+- 验证：`:source-host:test` 104 项、`:parser-host:test` 25 项（2 项条件跳过）通过，新增缓存注册/首次调用构造/产物被替换后拒绝/
+  缓存损坏回退用例；真实预览 `testConvertedRealMihonApkRunsOnSimulator`、`testJarMangaPagesRender`、`testAniyomiEpisodePlays` 通过。

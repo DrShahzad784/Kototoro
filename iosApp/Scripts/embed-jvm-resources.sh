@@ -15,6 +15,10 @@ if [[ "${PLATFORM_NAME:-}" != "iphonesimulator" && "${PLATFORM_NAME:-}" != "ipho
 fi
 
 runtime="${KOTOTORO_JVM_DIRECTORY:-$SRCROOT/build/jvm}"
+if [[ -f "$runtime/boot-shims.jar" ]]; then
+    echo "Legacy boot-shims.jar profile detected; regenerate the runtime with Kototoro's own shims." >&2
+    exit 1
+fi
 for required in java_bundle/lib/modules libkototoro-jvm.a include/jni.h lib sources/config.json; do
     if [[ ! -e "$runtime/$required" ]]; then
         echo "Missing JVM preview artifact: $runtime/$required" >&2
@@ -26,6 +30,3 @@ mkdir -p "$destination"
 for directory in java_bundle lib sources; do
     ditto "$runtime/$directory" "$destination/$directory"
 done
-if [[ -f "$runtime/boot-shims.jar" ]]; then
-    ditto "$runtime/boot-shims.jar" "$destination/boot-shims.jar"
-fi

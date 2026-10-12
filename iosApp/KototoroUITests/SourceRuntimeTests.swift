@@ -127,6 +127,8 @@ final class SourceRuntimeTests: XCTestCase {
         XCTAssertTrue(app.images["reader.image"].waitForExistence(timeout: 30), "Image failed: \(app.debugDescription)")
         let progress = app.sliders["reader.progress"]
         XCTAssertTrue(progress.waitForExistence(timeout: 5))
+        // Reader preferences persist across tests; the edge-tap assertions below require right-to-left mode.
+        selectReaderMode("从右到左", in: app)
         progress.adjust(toNormalizedSliderPosition: 0)
         assertPosition(app, page: 1, total: 2)
         // Tap zones: the default right-to-left mode turns forward on the left edge; the centre toggles controls.

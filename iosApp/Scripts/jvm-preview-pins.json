@@ -1,12 +1,8 @@
 {
     "openjdkRevision": "ad8bb1b065bf230d193a1dfd0ebd39a8b1fedf53",
-    "upstreamRevision": "b86cead7dd1387b09c71e7f4b15c1e020463e422",
-    "simulatorPatchRevision": "820a5cf20bdd7eba189437be6fa5b21daa504cec",
     "downloads": {
         "mobile.tar.gz": ["https://codeload.github.com/openjdk/mobile/tar.gz/ad8bb1b065bf230d193a1dfd0ebd39a8b1fedf53", "60077ba3cdc9f9ce6931488b6b1b4cdb15a904a9583512c4bfb3906090b81164"],
-        "upstream.tar.gz": ["https://codeload.github.com/az4521/TachiyomiAzIOS/tar.gz/b86cead7dd1387b09c71e7f4b15c1e020463e422", "66abf5427e721b164ae3d496796f6b09fb2494473dbabd3c39a5be5bd6f59f39"],
-        "simulator-patch.sh": ["https://raw.githubusercontent.com/az4521/TachiyomiAZ/820a5cf20bdd7eba189437be6fa5b21daa504cec/iosApp/Scripts/rebuild-jvm-simulator.sh", "b3b12174fa34bfe418368c38f0fc4f7a12d079f34f4d9061afcfe4a4dfd7d1ec"],
-        "symbol_keeper.cpp": ["https://raw.githubusercontent.com/openjdk-mobile/ios-tools/0a753240e2b143137e73593c48d646a4956c2351/openjdk-ext/src/hotspot/symbol_keeper.cpp", "ec02a950b2c630b234aa393abdf48efe7ce95c3a637c189e0a2e492e8ec316db"],
+        "linker-jdk.tar.gz": ["https://github.com/adoptium/temurin26-binaries/releases/download/jdk-26%2B35/OpenJDK26U-jdk_aarch64_mac_hotspot_26_35.tar.gz", "596ba026474808b75e934aa8c32cf9b340fafc455d06f366ede4f2932f206eb1"],
         "libffi.zip": ["https://github.com/openjdk-mobile/ios-tools/releases/download/libffi-build/libffi-ios-sim.zip", "701b522e3eff0263f18d4a9e487f0a7ac30050fb2af20e86b6849daa14f5781f"],
         "libffi-device.zip": ["https://github.com/openjdk-mobile/ios-tools/releases/download/libffi-build/libffi-ios.zip", "4f39fd1d53fbd69d1bdbd915413077d130daa3f6792d1b3a03a690a9cbd4dea3"],
         "autoconf.tar.xz": ["https://ftp.gnu.org/gnu/autoconf/autoconf-2.72.tar.xz", "ba885c1319578d6c94d46e9b0dceb4014caafe2490e437a0dbca3f270a223f5a"],

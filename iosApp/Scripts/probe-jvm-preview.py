@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the staged real-extension profile on this Mac's JDK through the JSONL host, before the simulator.
 
-Same classpath, boot shims, platform class and config as the iOS app (iosApp/build/jvm-real-api); data goes to a
+Same classpath, platform class and config as the iOS app (iosApp/build/jvm-real-api); data goes to a
 fresh directory under iosApp/build. For each requested source: list -> details -> first chapter's pages / text,
 plus an image or stream check. Usage: probe-jvm-preview.py [source names...] (default: one per ecosystem).
 """
@@ -28,7 +28,7 @@ class Host:
             ["/usr/libexec/java_home", "-v", "24"], text=True).strip()) / "bin/java"
         classpath = ":".join(str(p) for p in sorted((PROFILE / "lib").glob("*.jar")))
         self.process = subprocess.Popen(
-            [java, "-Xbootclasspath/a:" + str(PROFILE / "boot-shims.jar"), "-Duser.home=" + str(data), "-Dkototoro.source.diagnostics=stderr", *os.environ.get("KOTOTORO_PROBE_JVM_OPTIONS", "").split(),
+            [java, "-Duser.home=" + str(data), "-Dkototoro.source.diagnostics=stderr", *os.environ.get("KOTOTORO_PROBE_JVM_OPTIONS", "").split(),
              "-cp", classpath, "org.skepsun.kototoro.source.host.SourceHostCliKt", "serve", data / "config.json"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=open(data / "host.log", "w"), text=True)
         self.data = data

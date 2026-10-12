@@ -35,7 +35,7 @@ import java.util.concurrent.atomic.AtomicReference
 
 /**
  * iOS platform for the pinned Mobile API: Mihon / Tsundoku / Aniyomi extensions plus kototoro / kotatsu / UMA parser
- * JARs on one network client. WKWebView/graphics/JavaScript are not enabled by this adapter.
+ * JARs on one network client. Kototoro's native adapter supplies WebKit, ImageIO, CoreText and JavaScriptCore.
  */
 class MihonIosPlatform : SourceHostPreferenceUiPlatform, SourceHostRuntimePlatform {
     private var application: IosApplication? = null
@@ -49,6 +49,8 @@ class MihonIosPlatform : SourceHostPreferenceUiPlatform, SourceHostRuntimePlatfo
     private var ownedCookies: CookieHandler? = null
     private var ownsClaim = false
     private var closed = false
+    /** Parser plugins' cached source lists, so start-up does not open plugins whose sources go unused. */
+    private var parserCatalogs: Path? = null
 
     override fun initialize(): ClassLoader = error("Persistent preferences are required by the iOS platform")
 
@@ -83,6 +85,7 @@ class MihonIosPlatform : SourceHostPreferenceUiPlatform, SourceHostRuntimePlatfo
             check(handler.post(action)) { "iOS compatibility callback was rejected" }
         }).also { this.preferences = it }
         val app = IosApplication(root, bridge).also { application = it }
+        parserCatalogs = root.resolve("parser-catalogs")
         val koin = KoinApplication.init().also { container = it }
         koin.modules(createAppModule(app), module { single<Context> { app } })
         GlobalContext.startKoin(koin)
@@ -96,7 +99,17 @@ class MihonIosPlatform : SourceHostPreferenceUiPlatform, SourceHostRuntimePlatfo
         }
         // Kototoro's per-source domain setting reaches extensions whose address R8 folded into a constant.
         client = installDomainRewrite(helper)
+        installWebView()
         return javaClass.classLoader
+    }
+
+    /**
+     * Extensions' Android WebViews (and CookieManager) run on WKWebView once the app registered the native side
+     * ([IosWebKit]); the cookie manager keeps the NetworkHelper's cookie handler as OkHttp's store, so this comes after
+     * the client. Without the native side WebView stays unavailable, as before.
+     */
+    private fun installWebView() {
+        if (IosWebKit.isAvailable) IosWebKit.install()
     }
 
     override fun preferenceContext(): Any = requireNotNull(application).also { check(!closed) }
@@ -112,7 +125,7 @@ class MihonIosPlatform : SourceHostPreferenceUiPlatform, SourceHostRuntimePlatfo
             requireNotNull(client) { "Initialize the platform before opening plugin runtimes" },
             requireNotNull(preferences) { "Parser plugins need persistent preferences" },
         )
-        val registry = ParserPluginRegistry(parsers)
+        val registry = ParserPluginRegistry(parsers, catalogDirectory = parserCatalogs)
         try {
             for (plugin in plugins) {
                 val start = System.nanoTime()
@@ -223,8 +236,11 @@ private class IosApplication(private val root: Path, private val preferences: Mi
     override fun getCacheDir(): File = cache
     override fun getCodeCacheDir(): File = cache
     override fun getNoBackupFilesDir(): File = backup
-    override fun getSystemService(name: String): Any = throw UnsupportedOperationException("iOS service: $name")
-    override fun getResources(): android.content.res.Resources = throw UnsupportedOperationException("iOS resources")
+    override fun getSystemService(name: String): Any = when (name) {
+        Context.ACTIVITY_SERVICE -> org.skepsun.kototoro.ios.shims.IosServices.activityManager()
+        else -> throw UnsupportedOperationException("iOS service: $name")
+    }
+    override fun getResources(): android.content.res.Resources = android.content.res.Resources.getSystem()
     override fun getPackageManager(): android.content.pm.PackageManager =
         throw UnsupportedOperationException("iOS packages")
     private fun directory(name: String): File = Files.createDirectories(root.resolve(name)).toFile()

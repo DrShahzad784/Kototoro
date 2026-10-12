@@ -424,6 +424,89 @@ final class ExtensionEcosystemTests: XCTestCase {
         XCTAssertFalse(app.images["reader.image"].exists)
     }
 
+    /// Repository-installed JAR plugins other than kototoro-parsers (`testJarRepositoryShowsNameAndInstallsPlugin`
+    /// installs them): UMA (Tsuki) and k-parsers-r (kotatsu ABI) each read a chapter's first image. Candidates are
+    /// tried in order so one unreachable site does not stand for the whole plugin; each must be enabled by the
+    /// default language rules (sources only in other languages are not listed in browse).
+    @MainActor
+    func testUmaPluginMangaPagesRender() throws {
+        try readFirstAvailable(["MANGADEXORG", "MANGAFOX", "MANGAKEKO", "MANGABAT"])
+    }
+
+    @MainActor
+    func testKParsersRedoMangaPagesRender() throws {
+        // Its own Chinese / multi-language sites are offline (DNS failures, a 500 from the Webtoon API, Cloudflare),
+        // so English sources that only this plugin provides are switched on first: by default only the system's
+        // languages are enabled.
+        try readFirstAvailable(["MANGAKAKALOT", "MANGANATO", "MANGABUDDY", "COMICEXTRA"], enabling: true)
+    }
+
+    /// Switches sources on in extension management (来源 tab), as a user would for another language.
+    private func enableSources(_ names: [String]) {
+        app.buttons["sources.repositories"].tap()
+        let tabs = app.segmentedControls["repository.tabs"]
+        XCTAssertTrue(tabs.waitForExistence(timeout: 30))
+        tabs.buttons["来源"].tap()
+        let clearEcosystem = app.buttons["extension.ecosystem.clear"]
+        if clearEcosystem.exists { clearEcosystem.tap() }
+        let field = app.pageSearchField()
+        for name in names {
+            XCTAssertTrue(field.waitForExistence(timeout: 10), app.debugDescription)
+            field.tap()
+            if let text = field.value as? String, !text.isEmpty, text != field.placeholderValue {
+                field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: text.count + 2))
+            }
+            field.typeText(name)
+            let toggle = app.switches["source.toggle.\(name)"]
+            guard toggle.waitForExistence(timeout: 10) else { print("ENABLE \(name): not found"); continue }
+            if toggle.value as? String == "0" { toggle.switches.firstMatch.exists ? toggle.switches.firstMatch.tap() : toggle.tap() }
+            print("ENABLE \(name): \(toggle.value ?? "")")
+        }
+        app.terminate(); app.launch()
+        app.tabBars.buttons["浏览"].tap()
+    }
+
+    private func readFirstAvailable(_ names: [String], enabling: Bool = false) throws {
+        var failures: [String] = []
+        if enabling { enableSources(names) }
+        // Host stack traces of failed calls go to <data>/source-failures.log for this run.
+        app.terminate()
+        app.launchEnvironment["KOTOTORO_SOURCE_DIAGNOSTICS"] = "1"
+        app.launch()
+        app.tabBars.buttons["浏览"].tap()
+        for (index, name) in names.enumerated() {
+            // A fresh launch per candidate: the browse search keeps the previous text (and its cursor) after going back.
+            if index > 0 {
+                app.terminate(); app.launch()
+                app.tabBars.buttons["浏览"].tap()
+            }
+            let field = searchField()
+            field.tap()
+            field.typeText(name)
+            let source = app.buttons["source.\(name)"]
+            guard source.waitForExistence(timeout: 15) else { failures.append("\(name): not listed"); continue }
+            source.tap()
+            let first = app.descendants(matching: .any)
+                .matching(NSPredicate(format: "identifier BEGINSWITH %@", "source.content.")).firstMatch
+            waitForEither(first, element("sources.error"), timeout: 120)
+            guard first.exists else {
+                failures.append("\(name): \(element("sources.error").exists ? element("sources.error").label : "timeout")")
+                attach("\(name) failed")
+                continue
+            }
+            attach("\(name) browse")
+            first.tap()
+            openFirstChapter()
+            let image = app.images["reader.image"]
+            waitForEither(image, app.staticTexts["reader.error"], timeout: 120)
+            attach("\(name) reader")
+            XCTAssertTrue(image.exists, "\(name) reader failed: \(app.debugDescription)")
+            print("PLUGIN SOURCE OK \(name); earlier failures: \(failures)")
+            return
+        }
+        XCTFail("No candidate source worked: \(failures)")
+    }
+
     @MainActor
     func testJarNovelChapterText() throws {
         openFirstItem(source: "BILINOVEL", search: "BILINOVEL")
@@ -503,6 +586,57 @@ final class ExtensionEcosystemTests: XCTestCase {
             app.tabBars.buttons["浏览"].tap()
             XCTAssertTrue(app.staticTexts["sources.extensionRuntime"].waitForExistence(timeout: 90))
         }
+    }
+
+    /// A real Cloudflare-protected site (Comix, comix.to): a challenge on the listing is shown as such and cleared by
+    /// the automatic hidden-browser pass, after which the listing, details and a chapter's pages load. Needs network.
+    @MainActor
+    func testCloudflareProtectedSourceLoads() throws {
+        // Host stack traces of failed calls go to <data>/source-failures.log for this run.
+        app.terminate()
+        app.launchEnvironment["KOTOTORO_SOURCE_DIAGNOSTICS"] = "1"
+        app.launch()
+        app.mainTab("浏览").tap()
+        let name = "MIHON_7537715367149829912"
+        let field = searchField()
+        field.tap()
+        field.typeText("Comix")
+        let source = app.buttons["source.\(name)"]
+        XCTAssertTrue(source.waitForExistence(timeout: 30), "Comix missing: \(app.debugDescription)")
+        source.tap()
+        let first = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "source.content.")).firstMatch
+        let solving = element("source.solving")
+        let verify = app.buttons["source.verify"]
+        // Either the listing loads directly (clearance still valid) or the challenge is reported and solved.
+        let error = element("sources.error")
+        _ = XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            first.exists || solving.exists || verify.exists || error.exists
+        }, object: nil)], timeout: 120)
+        print("CLOUDFLARE state: content=\(first.exists) solving=\(solving.exists) verify=\(verify.exists) " +
+              "error=\(error.exists ? error.label : "-")")
+        attach("Comix first state")
+        if solving.exists {
+            print("CLOUDFLARE challenge reported: \(error.exists ? error.label : "-")")
+            attach("Comix challenge, solving")
+        }
+        _ = XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            first.exists || (verify.exists && !solving.exists) || (error.exists && !solving.exists && !verify.exists)
+        }, object: nil)], timeout: 120)
+        if !first.exists {
+            print("CLOUDFLARE after pass: error=\(error.exists ? error.label : "-") verify=\(verify.exists)")
+            attach("Comix automatic pass failed")
+        }
+        XCTAssertTrue(first.exists, "Comix listing failed: \(app.debugDescription)")
+        sleep(3)
+        attach("Comix browse")
+        first.tap()
+        openFirstChapter()
+        let image = app.images["reader.image"].firstMatch
+        waitForEither(image, element("reader.error"), timeout: 120)
+        if !image.exists { attach("Comix reader error") }
+        XCTAssertTrue(image.exists, "Comix pages failed: \(app.debugDescription)")
+        attach("Comix reader")
     }
 
     /// Prefers a check box or tag chip, then a genre group's first chip, then a menu's second option.

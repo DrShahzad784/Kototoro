@@ -61,8 +61,8 @@ object DexJarConverter {
 
     /**
      * Writes the class files of [source] to [target] (replaced atomically). Non-code resources that the JVM host
-     * may need (`META-INF/services`) are carried over, Android resources are not; [extraEntries] adds files such as
-     * the text manifest synthesised from an APK.
+     * may need (`META-INF/services`, and the APK's `assets/`) are carried over, compiled Android resources are not;
+     * [extraEntries] adds files such as the text manifest synthesised from an APK.
      */
     fun convert(source: Path, target: Path, extraEntries: Map<String, ByteArray> = emptyMap()): DexConversionReport {
         val dexSources = dexEntries(source)
@@ -80,7 +80,7 @@ object DexJarConverter {
                     classes += result.classes
                     repaired += result.repaired
                 }
-                copyServices(source, output, written)
+                copyResources(source, output, written)
                 for ((name, bytes) in extraEntries) {
                     if (!written.add(name)) continue
                     output.putNextEntry(ZipEntry(name).apply { time = 0 })
@@ -315,12 +315,17 @@ object DexJarConverter {
         }
     }
 
-    /** Service registrations survive conversion of a plugin jar; they are tiny and host-relevant. */
-    private fun copyServices(source: Path, output: ZipOutputStream, written: MutableSet<String>) {
+    /**
+     * Service registrations survive conversion of a plugin jar, and so do an APK's `assets/`: Android's class loader
+     * serves every entry of the package, and extensions read their bundled scripts that way
+     * (`javaClass.getResource("/assets/chapter_list.js")` in Comix, which runs them in a WebView).
+     */
+    private fun copyResources(source: Path, output: ZipOutputStream, written: MutableSet<String>) {
         val zip = try { ZipFile(source.toFile()) } catch (_: IOException) { return }
         zip.use {
             for (entry in zip.entries()) {
-                if (entry.isDirectory || !entry.name.startsWith("META-INF/services/") || !written.add(entry.name)) continue
+                val carried = entry.name.startsWith("META-INF/services/") || entry.name.startsWith("assets/")
+                if (entry.isDirectory || !carried || !written.add(entry.name)) continue
                 output.putNextEntry(ZipEntry(entry.name).apply { time = 0 })
                 zip.getInputStream(entry).use { it.copyTo(output) }
                 output.closeEntry()

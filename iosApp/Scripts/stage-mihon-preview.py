@@ -4,7 +4,7 @@
 Artifacts come from repositories listed on the Kototoro repo hub, pinned by SHA-256 and converted on this Mac with
 :dex-convert (devices receive the converted JARs; on-device conversion is a later step):
 
-  * Mihon     再漫画 (keiyoushi)            -> MIHON_<id>, manga
+  * Mihon     再漫画, Comix (keiyoushi)     -> MIHON_<id>, manga (comix.to sits behind Cloudflare)
   * Tsundoku  AllNovelFull (NovelSourcery)  -> TSUNDOKU_<id>, novels
   * Aniyomi   AnimeGG, Anime1.me (yuzono)   -> ANIYOMI_<id>, video
   * JAR       kototoro-parsers plugin 137   -> parser enum names, served by :parser-host
@@ -31,6 +31,10 @@ ARTIFACTS = [
     ("zaimanhua.apk",
      "https://github.com/keiyoushi/extensions/releases/download/24bc6c2/tachiyomi-zh.zaimanhua-v1.6.0.apk",
      "f6605e36a7d1453b60814bb6f7340a8f724183b11ee3f95e02d9542753ba81fe"),
+    # Cloudflare-protected site (comix.to): the automatic hidden-browser pass and the manual verification.
+    ("tachiyomi-en.comix-v1.6.46.apk",
+     "https://github.com/keiyoushi/extensions/releases/download/b5d2cd5/tachiyomi-en.comix-v1.6.46.apk",
+     "3166a50b565a5bc92c8ad8e4fb64a916695c2c4201e2d7ac465a333da461e3a0"),
     ("tachiyomi-en.allnovelfull-v1.6.19.apk",
      "https://github.com/NovelSourcery/extensions/releases/download/ba92ea4/tachiyomi-en.allnovelfull-v1.6.19.apk",
      "3f1d1e774069974e85007e09c487f0d9c5cc3928126d47c660222ea7d82c1c8b"),
@@ -67,6 +71,8 @@ def sha256(path):
 def main():
     if not (SOURCE / "libkototoro-jvm.a").is_file():
         raise RuntimeError("Run build-jvm-preview.py first")
+    if not (SOURCE / "runtime-origin.json").is_file():
+        raise RuntimeError("Rebuild the JVM with Kototoro's own OpenJDK adaptations first")
     spec = spec_from_file_location("jvm_preview", APP / "Scripts/build-jvm-preview.py")
     builder = module_from_spec(spec)
     spec.loader.exec_module(builder)
@@ -78,9 +84,8 @@ def main():
     TARGET.mkdir(parents=True)
     with zipfile.ZipFile(builder.download("runtime.ipa")) as archive:
         for name in archive.namelist():
-            if "/tachiaz-compat/" in name and name.endswith(".jar"):
+            if "/tachiaz-compat/" in name and name.endswith(".jar") and not name.rsplit("/", 1)[1].startswith("000-"):
                 (compatibility / name.rsplit("/", 1)[1]).write_bytes(archive.read(name))
-        (TARGET / "boot-shims.jar").write_bytes(archive.read("Payload/Aidoku.app/tachiaz-mobile-shims.jar"))
 
     sources = TARGET / "sources"
     sources.mkdir()
@@ -108,15 +113,19 @@ def main():
     for name in ["java_bundle", "include"]:
         shutil.copytree(SOURCE / name, TARGET / name, dirs_exist_ok=True)
     shutil.copy2(SOURCE / "libkototoro-jvm.a", TARGET / "libkototoro-jvm.a")
+    shutil.copy2(SOURCE / "runtime-origin.json", TARGET / "runtime-origin.json")
     lib = TARGET / "lib"
     lib.mkdir()
-    for index, name in enumerate(["000-tachiaz-mobile-compat-shims.jar", "AndroidCompat-1.0.jar", "server-1.0.jar",
+    for index, name in enumerate(["AndroidCompat-1.0.jar", "server-1.0.jar",
                                   "android-jar-1.0.0.jar"]):
-        shutil.copy2(compatibility / name, lib / (str(index).zfill(2) + "-" + name))
+        shutil.copy2(compatibility / name, lib / (str(index + 1).zfill(2) + "-" + name))
     adapter = SOURCE / "ios-adapter"
+    shutil.copy2(adapter / "deps/mihon-ios-shims.jar", lib / "00-kototoro-ios-shims.jar")
     shutil.copy2(adapter / "mihon-ios-compat.jar", lib / "05-mihon-ios-compat.jar")
     mobile = {base_name(item): item for item in compatibility.glob("*.jar") if not item.name.startswith(MOBILE_CORE)}
     for item in sorted((adapter / "deps").glob("*.jar")):
+        if item.name == "mihon-ios-shims.jar":
+            continue
         base = base_name(item)
         if base in mobile and not base.startswith(OURS):
             continue  # the Mobile API provides it
@@ -141,6 +150,11 @@ def main():
     (sources / "config.json").write_text(json.dumps(config, indent=2))
     (sources / "preview.json").write_text(json.dumps({"label": "真实扩展兼容性验证（Mihon/Tsundoku/Aniyomi/JAR）"},
                                                      ensure_ascii=False))
+    # Fail closed if a stale build or dependency reintroduces TachiaZ shim classes.
+    for item in lib.glob("*.jar"):
+        with zipfile.ZipFile(item) as archive:
+            if any(name.startswith("app/tachiaz/") for name in archive.namelist()):
+                raise RuntimeError("Third-party TachiaZ shim remains in classpath: " + str(item))
     # Inspectable digest inventory of the generated preview; not a production distribution manifest.
     inventory = {str(item.relative_to(TARGET)): sha256(item)
                  for item in TARGET.rglob("*") if item.is_file() and item.name != "inventory.json"}

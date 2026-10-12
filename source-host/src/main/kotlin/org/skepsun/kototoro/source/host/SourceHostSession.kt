@@ -74,7 +74,8 @@ class SourceHostSession private constructor(
                         (platform as SourceHostPreferencePlatform).initialize(preferences)
                     } else platform.initialize()
                 }
-                registry = MihonJarRegistry(loader)
+                registry = MihonJarRegistry(loader,
+                    catalogDirectory = config.catalogDirectory?.let { configurationDirectory.resolve(it).normalize() })
                 val installed = SourceHostManagement.readInstalled(configurationDirectory)
                 for (jar in config.jars) {
                     if (installed.jars.any { it.identity.packageName == jar.identity.packageName }) continue
@@ -142,13 +143,25 @@ class SourceHostSession private constructor(
         }
 
         /**
-         * Development diagnostics (`-Dkototoro.source.diagnostics=stderr`): the wire protocol deliberately carries no
-         * causes, so probes need the host-side stack trace. Off by default; may include site URLs.
+         * Development diagnostics (`-Dkototoro.source.diagnostics=stderr`, or `=file:<path>` where stderr is not
+         * visible, as in an iOS app): the wire protocol deliberately carries no causes, so probes need the host-side
+         * stack trace. Off by default; may include site URLs.
          */
         private fun reportFailure(request: SourceRequest, error: Exception) {
-            if (System.getProperty("kototoro.source.diagnostics") != "stderr") return
-            System.err.println("SOURCE_FAILURE ${request.requestId} ${request.call::class.simpleName}")
-            error.printStackTrace()
+            val target = System.getProperty("kototoro.source.diagnostics") ?: return
+            val header = "SOURCE_FAILURE ${request.requestId} ${request.call::class.simpleName}"
+            when {
+                target == "stderr" -> {
+                    System.err.println(header)
+                    error.printStackTrace()
+                }
+                target.startsWith("file:") -> synchronized(this) {
+                    runCatching {
+                        java.io.PrintStream(java.io.FileOutputStream(target.removePrefix("file:"), true), true, "UTF-8")
+                            .use { out -> out.println(header); error.printStackTrace(out) }
+                    }
+                }
+            }
         }
 
         private fun closeResources(vararg resources: Closeable?) {

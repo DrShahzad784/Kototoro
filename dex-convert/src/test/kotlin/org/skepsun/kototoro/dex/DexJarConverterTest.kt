@@ -70,7 +70,7 @@ class DexJarConverterTest {
     }
 
     @Test
-    fun `every classes dex of an apk is converted and services are carried over`() {
+    fun `every classes dex of an apk is converted and services and assets are carried over`() {
         val tools = AndroidTools.find()
         assumeTrue(tools != null, "Android SDK with d8 is required")
         val first = tools!!.dex(tools.compileJar(root.resolve("a"), greeter), root.resolve("dex-a"))
@@ -81,6 +81,7 @@ class DexJarConverterTest {
             "classes2.dex" to Files.readAllBytes(second),
             "classes.dex" to Files.readAllBytes(first),
             "META-INF/services/fixture.Service" to "other.Other".toByteArray(),
+            "assets/chapter_list.js" to "window.list = [];".toByteArray(),
             "res/layout/unused.xml" to ByteArray(4),
         ))
         val target = root.resolve("converted.jar")
@@ -89,6 +90,8 @@ class DexJarConverterTest {
         ZipFile(target.toFile()).use { zip ->
             assertTrue(zip.getEntry("fixture/Greeter.class") != null && zip.getEntry("other/Other.class") != null)
             assertTrue(zip.getEntry("META-INF/services/fixture.Service") != null)
+            // Extensions read bundled scripts with getResource("/assets/..."), as Android's class loader allows.
+            assertTrue(zip.getEntry("assets/chapter_list.js") != null)
             assertTrue(zip.getEntry("res/layout/unused.xml") == null, "Android resources are not carried over")
         }
     }

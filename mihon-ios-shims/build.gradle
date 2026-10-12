@@ -1,0 +1,38 @@
+// Android classes the iOS JVM lacks, for extensions running on the embedded OpenJDK Mobile (no java.desktop, no
+// Android framework). Each class here takes the place of an `android.jar` stub (which throws "Stub!") or of a
+// desktop implementation in AndroidCompat (AWT / ImageIO), so the jar goes first on the iOS class path. Written for
+// Kototoro against the public Android API; native work (JavaScript, images, text, PDF) goes to the app through
+// org.skepsun.kototoro.ios.shims.IosNative.
+plugins {
+    id 'org.jetbrains.kotlin.jvm'
+}
+
+kotlin {
+    jvmToolchain(24)
+    compilerOptions { jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11 }
+}
+java {
+    sourceCompatibility = JavaVersion.VERSION_11
+    targetCompatibility = JavaVersion.VERSION_11
+}
+
+def compatibility = providers.gradleProperty('mihonIosCompatibilityDirectory')
+if (!compatibility.isPresent()) throw new GradleException('Set -PmihonIosCompatibilityDirectory to the pinned iOS API directory')
+def apis = fileTree(file(compatibility.get())) {
+    include '*.jar'
+    exclude '000-*', 'kotlin-stdlib*'
+}
+
+dependencies {
+    implementation libs.kotlinx.serialization.json
+    compileOnly apis
+    testImplementation apis
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.8.2'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.8.2'
+}
+
+tasks.withType(Test).configureEach {
+    useJUnitPlatform()
+    def nativeLibrary = providers.gradleProperty('nativeIosLibrary')
+    if (nativeLibrary.isPresent()) systemProperty 'kototoro.native.library', file(nativeLibrary.get()).absolutePath
+}

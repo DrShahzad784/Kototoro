@@ -4,9 +4,13 @@
 #if KTR_HAS_JVM
 #include <jni.h>
 #include <limits>
+#include <fstream>
 #include <mutex>
 #include <string>
 #include <vector>
+#if KTR_HAS_NATIVE_SHIMS
+extern "C" int ktr_native_install(JNIEnv *env);
+#endif
 
 struct KTRSession {
     jobject host;
@@ -133,6 +137,10 @@ int ktr_vm_start(const char *java_home, const char *classpath,
         report(error, "JVM initialization previously failed; restart the process before retrying");
         return -1;
     }
+    if (!std::ifstream(std::string(java_home) + "/lib/modules").good()) {
+        report(error, "The bundled JVM module image is missing or unreadable");
+        return -1;
+    }
     // OpenJDK Mobile uses JAVA_HOME while resolving its statically linked module image.
     setenv("JAVA_HOME", java_home, 1);
     std::string home_option = std::string("-Djava.home=") + java_home;
@@ -157,6 +165,13 @@ int ktr_vm_start(const char *java_home, const char *classpath,
         report(error, "JNI_CreateJavaVM failed: " + std::to_string(status));
         return -1;
     }
+#if KTR_HAS_NATIVE_SHIMS
+    if (ktr_native_install(env) != 0 || env->ExceptionCheck()) {
+        report(error, exception_message(env));
+        vm->DetachCurrentThread();
+        return -1;
+    }
+#endif
     vm_home = java_home;
     vm_classpath = classpath;
     vm_options = extra;
@@ -278,6 +293,118 @@ int ktr_session_close(KTRSession *session, char **error) {
     return failed ? -1 : 0;
 }
 
+namespace {
+KTRWebKitHandler webkit_handler = nullptr;
+jclass webkit_type = nullptr;
+jmethodID webkit_event = nullptr;
+
+std::vector<jchar> java_text(JNIEnv *env, jstring text) {
+    std::vector<jchar> value;
+    if (text == nullptr) return value;
+    value.resize(static_cast<size_t>(env->GetStringLength(text)));
+    if (!value.empty()) env->GetStringRegion(text, 0, static_cast<jsize>(value.size()), value.data());
+    return value;
+}
+
+jstring JNICALL webkit_command(JNIEnv *env, jclass, jstring operation, jlong view, jstring payload) {
+    if (webkit_handler == nullptr) return env->NewStringUTF("unavailable:WebKit is not connected");
+    auto name = java_text(env, operation), body = java_text(env, payload);
+    size_t length = 0;
+    uint16_t *result = webkit_handler(reinterpret_cast<const uint16_t *>(name.data()), name.size(),
+                                      static_cast<int64_t>(view), reinterpret_cast<const uint16_t *>(body.data()),
+                                      body.size(), &length);
+    if (result == nullptr) return nullptr;
+    jstring text = env->NewString(reinterpret_cast<const jchar *>(result), static_cast<jsize>(length));
+    std::free(result);
+    return text;
+}
+}
+
+int ktr_webkit_install(KTRWebKitHandler handler, char **error) {
+    if (error != nullptr) *error = nullptr;
+    if (handler == nullptr) {
+        report(error, "A WebKit handler is required");
+        return -1;
+    }
+    Environment thread;
+    JNIEnv *env = thread.value;
+    if (env == nullptr) {
+        report(error, "Unable to attach to the Java VM");
+        return -1;
+    }
+    jclass type = env->FindClass("org/skepsun/kototoro/ios/compat/IosWebKit");
+    jmethodID event = type == nullptr ? nullptr : env->GetStaticMethodID(type, "onNativeEvent",
+        "(JLjava/lang/String;Ljava/lang/String;)Ljava/lang/String;");
+    if (event == nullptr) {
+        report(error, exception_message(env));
+        return -1;
+    }
+    JNINativeMethod method{const_cast<char *>("nativeCommand"),
+        const_cast<char *>("(Ljava/lang/String;JLjava/lang/String;)Ljava/lang/String;"),
+        reinterpret_cast<void *>(&webkit_command)};
+    if (env->RegisterNatives(type, &method, 1) != JNI_OK) {
+        report(error, exception_message(env));
+        return -1;
+    }
+    webkit_type = static_cast<jclass>(env->NewGlobalRef(type));
+    webkit_event = event;
+    webkit_handler = handler;
+    // Tells the platform adapter that WebView calls have a native backend (IosWebKit.isAvailable).
+    jclass system = env->FindClass("java/lang/System");
+    jmethodID set = system == nullptr ? nullptr : env->GetStaticMethodID(system, "setProperty",
+        "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;");
+    if (set != nullptr) {
+        env->CallStaticObjectMethod(system, set, env->NewStringUTF("kototoro.webkit"), env->NewStringUTF("native"));
+    }
+    if (env->ExceptionCheck()) {
+        report(error, exception_message(env));
+        return -1;
+    }
+    return 0;
+}
+
+int ktr_webkit_dispatch(int64_t view, const uint16_t *event, size_t event_length,
+                        const uint16_t *payload, size_t payload_length,
+                        uint16_t **result, size_t *result_length, char **error) {
+    if (error != nullptr) *error = nullptr;
+    if (result != nullptr) *result = nullptr;
+    if (result_length != nullptr) *result_length = 0;
+    if (webkit_type == nullptr || !valid_text(event, event_length) || !valid_text(payload, payload_length)) {
+        report(error, "WebKit bridge is not installed");
+        return -1;
+    }
+    Environment thread;
+    JNIEnv *env = thread.value;
+    if (env == nullptr) {
+        report(error, "Unable to attach to the Java VM");
+        return -1;
+    }
+    jstring name = java_string(env, event, event_length);
+    jstring body = name == nullptr ? nullptr : java_string(env, payload, payload_length);
+    if (body == nullptr || env->ExceptionCheck()) {
+        report(error, exception_message(env));
+        return -1;
+    }
+    auto output = static_cast<jstring>(env->CallStaticObjectMethod(webkit_type, webkit_event,
+                                                                    static_cast<jlong>(view), name, body));
+    if (env->ExceptionCheck()) {
+        report(error, exception_message(env));
+        return -1;
+    }
+    if (output == nullptr || result == nullptr || result_length == nullptr) return 0;
+    const jsize length = env->GetStringLength(output);
+    auto *buffer = static_cast<uint16_t *>(std::malloc((static_cast<size_t>(length) + 1) * sizeof(uint16_t)));
+    if (buffer == nullptr) {
+        report(error, "Unable to allocate the WebKit event result");
+        return -1;
+    }
+    env->GetStringRegion(output, 0, length, reinterpret_cast<jchar *>(buffer));
+    buffer[length] = 0;
+    *result = buffer;
+    *result_length = static_cast<size_t>(length);
+    return 0;
+}
+
 #else
 static void unavailable(char **error) {
     if (error != nullptr) *error = strdup("Embedded JVM is not included in this build");
@@ -303,4 +430,18 @@ int ktr_session_close(KTRSession *, char **error) {
     return 0;
 }
 #endif
+#if !KTR_HAS_JVM
+int ktr_webkit_install(KTRWebKitHandler, char **error) {
+    unavailable(error);
+    return -1;
+}
+int ktr_webkit_dispatch(int64_t, const uint16_t *, size_t, const uint16_t *, size_t,
+                        uint16_t **result, size_t *result_length, char **error) {
+    if (result != nullptr) *result = nullptr;
+    if (result_length != nullptr) *result_length = 0;
+    unavailable(error);
+    return -1;
+}
+#endif
 void ktr_free(void *memory) { std::free(memory); }
+void *ktr_malloc(size_t size) { return std::malloc(size); }

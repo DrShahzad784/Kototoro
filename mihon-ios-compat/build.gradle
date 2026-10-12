@@ -33,10 +33,12 @@ sourceSets.main.kotlin.srcDir(rootProject.file('mihon-desktop-compat/src/main/ko
 
 dependencies {
     implementation project(':source-host')
+    implementation project(':mihon-ios-shims')
     implementation project(':core-source')
     // kototoro / kotatsu / UMA parser JARs share the Mobile API's OkHttp client and cookie store.
     implementation project(':parser-host')
     implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:${libs.versions.coroutines.get()}"
+    implementation libs.kotlinx.serialization.json
     compileOnly apis
     testImplementation apis
     testImplementation 'org.junit.jupiter:junit-jupiter:5.8.2'
