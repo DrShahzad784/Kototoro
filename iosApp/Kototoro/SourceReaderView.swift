@@ -53,6 +53,9 @@ final class SourceReaderModel: ObservableObject {
     private var savedPosition: IosReadingPosition?
     private(set) var restoreOrigin: CGFloat = 0
     private var awaitingRestore = false
+    /// A freshly created paged scroll view starts at its first slot and reports it before it is moved to the
+    /// reading slot; those reports must not overwrite the position (switching page-turn styles recreates it).
+    private(set) var pendingSlot: Int?
 
     var selectedPage: IosSourcePage? { pages.indices.contains(index) ? pages[index] : nil }
     var image: UIImage? { images[index] }
@@ -227,6 +230,23 @@ final class SourceReaderModel: ObservableObject {
         return segment == 1 || segment == 2 ? SourceImageFile.splitPage(base, segment: segment) : base
     }
 
+    /// The paged scroll view is (re)created at its first slot; returns the slot it has to be moved to.
+    func beginSlotRestore() -> Int? {
+        guard loaded, !slots.isEmpty else { return nil }
+        pendingSlot = slotIndex
+        return slotIndex
+    }
+
+    /// A slot the paged scroll view reports; ignored until it has reached the slot being restored.
+    func scrolledToSlot(_ selected: Int) {
+        if let pendingSlot {
+            guard selected == pendingSlot else { return }
+            self.pendingSlot = nil
+        }
+        slotIndex = selected
+        selectSlot(selected)
+    }
+
     func selectSlot(_ selected: Int) {
         guard let slot = slots.first(where: { Int($0.index) == selected }) else { return }
         index = Int(slot.anchor); offset = 0
@@ -254,17 +274,18 @@ final class SourceReaderModel: ObservableObject {
         slots = engine.slots()
     }
 
-    func userScrolled() { awaitingRestore = false; autoScroll = false }
+    func userScrolled() { awaitingRestore = false; pendingSlot = nil; autoScroll = false }
 
     func jump(to page: Int) {
         guard pages.indices.contains(page) else { return }
-        index = page; offset = 0
+        index = page; offset = 0; pendingSlot = nil
         slotIndex = Int(slots.first { $0.placements.contains { Int($0.index) == page } }?.index ?? 0)
     }
 
     func movePage(forward: Bool) {
         let next = slotIndex + (forward ? 1 : -1)
         guard slots.indices.contains(next) else { return }
+        pendingSlot = nil
         slotIndex = next; selectSlot(next)
     }
 
@@ -272,7 +293,7 @@ final class SourceReaderModel: ObservableObject {
         guard !isLoadingPages else { return }
         startAtEnd = atEnd
         await persist()
-        request = UUID(); chapter = target; loaded = false
+        request = UUID(); chapter = target; loaded = false; pendingSlot = nil
         cancelFetches()
         pages = []; slots = []; images = [:]; artifacts = [:]; loading = []; index = 0; slotIndex = 0; offset = 0; engine.reset()
         await load()
@@ -472,6 +493,7 @@ struct SourceReaderView: View {
         let continuous = settings.value.mode >= 3
         let strip = settings.value.mode == 3
         // The vertical strip also scrolls across once zoomed wider than the screen.
+        ScrollViewReader { proxy in
         ScrollView(strip ? [.vertical, .horizontal] : vertical ? .vertical : .horizontal) {
             Group {
                 if vertical {
@@ -487,7 +509,7 @@ struct SourceReaderView: View {
         .modifier(ReaderPaging(paged: !continuous))
         .modifier(ReaderScrollPosition(continuous: continuous, position: $continuousPosition,
                                       slot: Binding<Int?>(get: { model.slotIndex },
-                                          set: { if let value = $0 { model.slotIndex = value; model.selectSlot(value) } })))
+                                          set: { if let value = $0 { model.scrolledToSlot(value) } })))
         .environment(\.layoutDirection, settings.value.mode == 1 || settings.value.mode == 4 ? .rightToLeft : .leftToRight)
         .id(settings.value.mode)
         .onScrollGeometryChange(for: CGPoint.self) { $0.contentOffset } action: { _, point in
@@ -506,6 +528,20 @@ struct SourceReaderView: View {
         })
         .onChange(of: model.loaded) { _, loaded in
             if continuous && loaded { scrollContinuous(to: model.restoreOrigin) }
+            if !continuous && loaded { restoreSlot(proxy) }
+        }
+        // Recreated when the page-turn style or reading mode changes; keep the page being read.
+        .onAppear { if !continuous { restoreSlot(proxy) } }
+        }
+    }
+
+    private func restoreSlot(_ proxy: ScrollViewProxy) {
+        guard let slot = model.beginSlotRestore() else { return }
+        Task { @MainActor in
+            // After the slots are laid out, or the lazy stack has nothing to scroll to yet.
+            await Task.yield()
+            guard model.pendingSlot == slot else { return }
+            proxy.scrollTo(slot, anchor: .topLeading)
         }
     }
 

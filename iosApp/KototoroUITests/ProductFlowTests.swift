@@ -436,4 +436,38 @@ final class ProductFlowTests: XCTestCase {
         app.tabBars.buttons["记录"].tap()
         XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "history.")).firstMatch.waitForExistence(timeout: 30))
     }
+
+    /// Resuming from the same details page that just played must continue, not restart (no relaunch in between).
+    @MainActor
+    func testCmsResumeFromSameDetailsAfterPlayback() throws {
+        let app = XCUIApplication(); app.launch()
+        importVideoSite(app, url: "http://127.0.0.1:8765/api.php/provide/vod/", title: "同页续播测试")
+        let search = app.pageSearchField()
+        XCTAssertTrue(search.waitForExistence(timeout: 10), app.debugDescription)
+        search.tap(); search.typeText("同页续播测试")
+        let source = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@",
+                                                      "source.JSON_TVBOX_", "同页续播测试")).firstMatch
+        XCTAssertTrue(source.waitForExistence(timeout: 30), app.debugDescription); source.tap()
+        let item = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "source.content.")).firstMatch
+        XCTAssertTrue(item.waitForExistence(timeout: 30)); item.tap()
+        XCTAssertTrue(app.staticTexts["details.title"].waitForExistence(timeout: 30))
+        let chapter = revealChapter(in: app, timeout: 30)
+        XCTAssertTrue(chapter.exists); chapter.tap()
+        let position = app.staticTexts["player.position"]
+        XCTAssertTrue(position.waitForExistence(timeout: 30))
+        let advanced = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            Int(position.label.components(separatedBy: " ").dropFirst().first ?? "") ?? 0 >= 6
+        }, object: nil)
+        wait(for: [advanced], timeout: 30)
+        playerControl(app, "player.close").tap()
+        let resume = app.buttons["details.resume"]
+        XCTAssertTrue(resume.waitForExistence(timeout: 30), app.debugDescription)
+        resume.tap()
+        XCTAssertTrue(position.waitForExistence(timeout: 30))
+        let resumed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            (Int(position.label.components(separatedBy: " ").dropFirst().first ?? "") ?? 0) >= 4
+        }, object: nil)
+        wait(for: [resumed], timeout: 3)
+        playerControl(app, "player.close").tap()
+    }
 }
