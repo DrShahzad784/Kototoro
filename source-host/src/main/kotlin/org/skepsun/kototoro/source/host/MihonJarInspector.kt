@@ -107,12 +107,12 @@ class MihonJarInspector(
         val (ecosystem, keyPrefix) = families.singleOrNull() ?: (SourceEcosystem.MIHON to "tachiyomi.extension")
         val novel = ecosystem == SourceEcosystem.TSUNDOKU
         val versionName = root.android("versionName").also { require(it.isNotBlank()) }
-        // Tsundoku infers a missing library marker from the version name ("1.6.15" -> "1.6"); Aniyomi's version name
-        // is the library ("14.1" -> 14, the major number is the extensions-lib generation).
+        // Mihon and Tsundoku infer a missing library marker from the version name ("1.4.85" -> "1.4"), as their
+        // Android loaders do; many third-party repositories never write the marker. Aniyomi's version name is the
+        // library ("14.1" -> 14, the major number is the extensions-lib generation).
         val library = values["tachiyomix.extensionLib"] ?: when (ecosystem) {
-            SourceEcosystem.TSUNDOKU -> versionName.substringBeforeLast('.', "")
             SourceEcosystem.ANIYOMI -> versionName.substringBeforeLast('.', versionName)
-            else -> ""
+            else -> versionName.substringBeforeLast('.', "")
         }
         val supportedLibrary = when (ecosystem) {
             SourceEcosystem.TSUNDOKU -> Regex("1\\.[46](?:\\.[0-9]+)*")

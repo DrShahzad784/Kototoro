@@ -19,6 +19,12 @@ import org.skepsun.kototoro.parsers.network.CloudFlareProtection
 @Dao
 abstract class MangaSourcesDao {
 
+    data class UsageCount(val source: String, val contentCount: Int)
+
+    /** Same stored-work count used by the POPULARITY ordering, read in one query for platform projections. */
+    @Query("SELECT source, COUNT(*) AS contentCount FROM manga GROUP BY source")
+    abstract suspend fun findUsageCounts(): List<UsageCount>
+
     @Query("SELECT * FROM sources ORDER BY pinned DESC, sort_key")
     abstract suspend fun findAll(): List<MangaSourceEntity>
 

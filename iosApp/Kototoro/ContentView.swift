@@ -2,121 +2,47 @@ import SwiftUI
 import KototoroShared
 
 struct ContentView: View {
+    private enum MainTab: Hashable { case library, browse, records, settings, search }
     @ObservedObject var library: LibraryModel
     @StateObject private var sources = SourcesModel()
-    @State private var isAddingCategory = false
-    @State private var categoryTitle = ""
+    @StateObject private var downloads = ReaderDownloadQueue(
+        file: NativeSourceTransport.downloadQueueFile
+    )
+    @Environment(\.scenePhase) private var scenePhase
     @State private var incomingLink: IncomingRepositoryLink?
-    @State private var selectedCategory: Int32?
-    @State private var categoryContent: CategoryContent?
+    @State private var openedFileMessage: String?
+    @State private var globalSearchQuery = ""
+    @State private var selectedTab = MainTab.library
+    @State private var searchSubmission = 0
+    @State private var resumed: CategoryContent?
+    @AppStorage(ContentSpace.key) private var space = ""
+    @AppStorage(ContentSpace.enabledKey) private var spacesEnabled = true
+
+    private var resumeLatest: IosLibraryEntry? {
+        ContentSpace.latest(in: library.history, enabled: spacesEnabled, space: space)
+    }
 
     var body: some View {
-        TabView {
-            NavigationStack {
-                List {
-                    if let runtime = sources.runtime, !library.favourites.isEmpty {
-                        Section("收藏") {
-                            ForEach(library.favourites.filter { selectedCategory == nil || $0.categoryIds.contains { $0.int32Value == selectedCategory } }, id: \.content.id) { entry in
-                                NavigationLink {
-                                    SourceDetailsView(runtime: runtime, content: entry.content)
-                                } label: {
-                                    LibraryContentRow(content: entry.content, runtime: runtime,
-                                                      progress: entry.hasProgress ? entry.progress : nil)
-                                }
-                                .accessibilityIdentifier("favourite.\(entry.content.id)")
-                                .contextMenu {
-                                    Button("整理分类", systemImage: "folder") { categoryContent = CategoryContent(content: entry.content) }
-                                    Button("取消收藏", systemImage: "heart.slash", role: .destructive) {
-                                        Task { try? await library.setFavourite(entry.content, favourite: false) }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if library.isLoading {
-                        ProgressView("正在读取漫画库…")
-                    } else if let error = library.error {
-                        ContentUnavailableView {
-                            Label("漫画库暂时不可用", systemImage: "exclamationmark.triangle")
-                        } description: {
-                            Text(error)
-                        } actions: {
-                            Button("重试") { Task { await library.load() } }
-                        }
-                    } else if library.categories.isEmpty {
-                        ContentUnavailableView(
-                            "开始整理漫画库",
-                            systemImage: "books.vertical",
-                            description: Text("创建分类，整理你接下来想读的漫画。")
-                        )
-                        .accessibilityIdentifier("library.empty")
-                    } else {
-                        Section("分类") {
-                            ForEach(library.categories, id: \.id) { category in
-                                Button {
-                                    selectedCategory = selectedCategory == category.id ? nil : category.id
-                                } label: {
-                                    Label(category.title, systemImage: selectedCategory == category.id ? "folder.fill" : "folder")
-                                }
-                                    .accessibilityIdentifier("category.\(category.id)")
-                            }
-                        }
-                    }
-                }
-                .navigationTitle("漫画库")
-                .refreshable { await library.refresh() }
-                .task { await library.refresh() }
-                .toolbar {
-                    Button("添加分类", systemImage: "folder.badge.plus") {
-                        categoryTitle = ""
-                        isAddingCategory = true
-                    }
-                    .disabled(library.isLoading || library.schemaVersion == nil)
-                    .accessibilityIdentifier("category.add")
-                }
-                .sheet(isPresented: $isAddingCategory) {
-                    NavigationStack {
-                        Form {
-                            TextField("分类名称", text: $categoryTitle)
-                                .accessibilityIdentifier("category.title")
-                            if let error = library.error {
-                                Text(error).foregroundStyle(.red)
-                            }
-                        }
-                        .navigationTitle("新建分类")
-                        .toolbar {
-                            ToolbarItem(placement: .cancellationAction) {
-                                Button("取消") { isAddingCategory = false }
-                            }
-                            ToolbarItem(placement: .confirmationAction) {
-                                Button("保存") {
-                                    Task {
-                                        if await library.addCategory(categoryTitle) {
-                                            isAddingCategory = false
-                                        }
-                                    }
-                                }
-                                .disabled(categoryTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                          || library.isLoading)
-                                .accessibilityIdentifier("category.save")
-                            }
-                        }
-                        .interactiveDismissDisabled(library.isLoading)
-                    }
-                    .presentationDetents([.medium])
-                }
-                .sheet(item: $categoryContent) { request in FavouriteCategoriesView(content: request.content) }
+        TabView(selection: $selectedTab) {
+            Tab("作品库", systemImage: "books.vertical", value: MainTab.library) {
+                LibraryView(library: library, sources: sources)
             }
-            .tabItem { Label("漫画库", systemImage: "books.vertical") }
-
-            SourcesView(library: library, model: sources)
-            .tabItem { Label("浏览", systemImage: "safari") }
-
-            LibraryRecordsView()
-                .tabItem { Label("记录", systemImage: "clock.arrow.circlepath") }
-
+            Tab("浏览", systemImage: "safari", value: MainTab.browse) {
+                SourcesView(library: library, model: sources)
+            }
+            Tab("记录", systemImage: "clock.arrow.circlepath", value: MainTab.records) {
+                LibraryRecordsView()
+            }
+            Tab("设置", systemImage: "gearshape", value: MainTab.settings) {
             NavigationStack {
                 List {
+                    Section {
+                        NavigationLink { RepositoriesView() } label: { Label("仓库与扩展", systemImage: "shippingbox") }
+                        NavigationLink { ReaderDownloadsView() } label: { Label("下载", systemImage: "arrow.down.circle") }
+                            .accessibilityIdentifier("settings.downloads")
+                        NavigationLink { BackupView() } label: { Label("备份与恢复", systemImage: "externaldrive") }
+                            .accessibilityIdentifier("settings.backup")
+                    }
                     Section("本地存储") {
                         if let version = library.schemaVersion {
                             LabeledContent("数据库版本", value: "\(version)")
@@ -125,38 +51,80 @@ struct ContentView: View {
                             Text("正在打开数据库…")
                         }
                     }
+                    ContentSpaceSettingsSection()
+                    PanoramaSettingsSection()
+                    ReaderLoadingSettingsSection()
                     Section("关于") {
                         LabeledContent("应用", value: "Kototoro")
                         LabeledContent("版本", value: "iOS 开发版")
                     }
-                    NavigationLink { RepositoriesView() } label: { Label("仓库与扩展", systemImage: "shippingbox") }
                 }
                 .navigationTitle("设置")
             }
-            .tabItem { Label("设置", systemImage: "gearshape") }
+            }
+            // The system's separate search button at the trailing end of the tab bar (iOS 26).
+            Tab(value: MainTab.search, role: .search) {
+                GlobalSearchView(query: $globalSearchQuery, submission: searchSubmission)
+            }
+        }
+        .searchable(text: $globalSearchQuery, prompt: "搜索全部来源中的作品")
+        .tabViewSearchActivation(.searchTabSelection)
+        .onSubmit(of: .search) {
+            if selectedTab == .search { searchSubmission += 1 }
         }
         .tabBarMinimizeBehavior(.onScrollDown)
+        .continueReadingAccessory(
+            enabled: !ReaderPresence.shared.isReading &&
+                ContentSpace.latest(in: library.history, enabled: spacesEnabled, space: space) != nil
+        )
+        .continueReadingPresentation(opened: $resumed)
+        .environment(\.openContinueReading) { resumed = $0 }
+        .task(id: "\(resumeLatest?.content.sourceName ?? "")|\(resumeLatest?.content.id ?? "")|\(sources.runtime != nil)") {
+            ContinueReadingCover.shared.image = nil
+            guard let latest = resumeLatest, let runtime = sources.runtime else { return }
+            ContinueReadingCover.shared.image = try? await CoverImage.image(runtime: runtime, content: latest.content)
+        }
+        .environment(\.openGlobalSearch) { selectedTab = .search }
         .environmentObject(library)
         .environmentObject(sources)
-        .onOpenURL { url in incomingLink = IncomingRepositoryLink(address: url.absoluteString) }
+        .environmentObject(downloads)
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background { downloads.setForeground(false) }
+            else if phase == .active { downloads.setForeground(true) }
+        }
+        .onOpenURL { url in
+            // Files shared to the app ("用 Kototoro 打开") become local works; links add repositories.
+            guard url.isFileURL else { incomingLink = IncomingRepositoryLink(address: url.absoluteString); return }
+            guard let runtime = sources.runtime else { return }
+            Task {
+                openedFileMessage = await LocalImport.run([url], runtime: runtime)
+                    ?? "已导入“\(url.deletingPathExtension().lastPathComponent)”，可在“浏览 · 本地作品”中查看"
+            }
+        }
+        .alert("导入本地文件", isPresented: Binding(get: { openedFileMessage != nil },
+                                                   set: { if !$0 { openedFileMessage = nil } })) {
+            Button("好") { openedFileMessage = nil }
+        } message: {
+            Text(openedFileMessage ?? "")
+        }
         .sheet(item: $incomingLink) { link in
             NavigationStack {
                 RepositoriesView(incoming: link.address)
                     .toolbar { ToolbarItem(placement: .cancellationAction) { Button("完成") { incomingLink = nil } } }
             }
+            // A sheet on this modifier chain sits outside the injected environment; pass the models explicitly.
+            .environmentObject(library)
+            .environmentObject(sources)
+            .environmentObject(downloads)
         }
         .task(id: library.library == nil) {
             guard let database = library.library else { return }
             sources.attach(database)
+            if let runtime = sources.runtime { downloads.attach(runtime: runtime) }
             await sources.load()
             await library.refresh()
         }
     }
-}
-
-private struct CategoryContent: Identifiable {
-    let content: IosSourceContent
-    var id: String { content.id }
 }
 
 struct FavouriteCategoriesView: View {

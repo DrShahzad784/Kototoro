@@ -412,6 +412,25 @@ class MihonSourceRuntimeTest {
         }
 
     @Test
+    fun `a pending image does not hold up the source's other calls`() =
+        runHost(FileSourceImageStore(directory.resolve("images"))) { registry, client ->
+            val source = registry.withSource(SOURCE) { it }
+            val page = client.fixturePages().last()
+            MihonReflection.call(source, "setImageMode", "deferred")
+            val image = async { client.fetchImage(page) }
+            val started = MihonReflection.call(source, "getImageStarted") as CountDownLatch
+            assertTrue(withContext(Dispatchers.IO) { started.await(10, TimeUnit.SECONDS) })
+            // Android's loaders call the extension concurrently; listing and details must not queue behind images.
+            withTimeout(10000) {
+                client.describe(SOURCE)
+                assertEquals(1, client.getList(SOURCE, 0, null, null).size)
+            }
+            MihonReflection.call(source, "completeImage")
+            assertEquals(page.id, withTimeout(10000) { image.await() }.pageId)
+            assertEquals(1, MihonReflection.call(source, "getImageCloses"))
+        }
+
+    @Test
     fun `cancellation closes a blocked body before releasing retired JAR and cleans staging files`() =
         runHost(FileSourceImageStore(directory.resolve("images"))) { registry, client ->
             val source = registry.withSource(SOURCE) { it }

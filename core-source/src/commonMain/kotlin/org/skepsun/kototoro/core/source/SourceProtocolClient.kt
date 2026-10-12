@@ -21,6 +21,10 @@ class SourceProtocolClient(
         call<SourceResult.Filters>(SourceCall.Filters(sourceName)).options
     override suspend fun getDynamicFilters(sourceName: String) =
         call<SourceResult.DynamicFilters>(SourceCall.DynamicFilters(sourceName)).filters
+    override suspend fun browserSession(sourceName: String) =
+        call<SourceResult.BrowserSession>(SourceCall.BrowserSession(sourceName)).session
+    override suspend fun importCookies(sourceName: String, url: String, cookies: List<String>) =
+        call<SourceResult.CookiesImported>(SourceCall.ImportCookies(sourceName, url, cookies)).count
     override suspend fun getPreferences(sourceName: String) =
         call<SourceResult.Preferences>(SourceCall.Preferences(sourceName)).screen
     override suspend fun updatePreference(

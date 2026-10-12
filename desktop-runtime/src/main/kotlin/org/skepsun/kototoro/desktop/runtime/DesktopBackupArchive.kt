@@ -6,9 +6,11 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.serialization.DeserializationStrategy
 import kotlinx.serialization.json.DecodeSequenceMode
-import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.decodeToSequence
-import org.skepsun.kototoro.backups.data.model.*
+import org.skepsun.kototoro.backups.data.model.BackupIndex
+import org.skepsun.kototoro.core.library.LibraryBackup
+import org.skepsun.kototoro.core.library.LibraryBackupInput
+import org.skepsun.kototoro.core.library.LibraryBackupJson
 import org.skepsun.kototoro.backups.domain.BackupSection
 import java.io.Closeable
 import java.nio.file.Files
@@ -17,7 +19,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.ZipFile
 import java.util.zip.ZipInputStream
 
-internal val DesktopBackupJson = Json { ignoreUnknownKeys = true; coerceInputValues = true }
+internal val DesktopBackupJson = LibraryBackupJson
 
 /** Owns a private copy, so changing the selected file cannot change a confirmed restore. */
 class DesktopBackupArchive private constructor(
@@ -27,10 +29,10 @@ class DesktopBackupArchive private constructor(
     val index: BackupIndex,
     val counts: Map<BackupSection, Int>,
     val otherEntries: List<String>,
-) : Closeable {
+) : Closeable, LibraryBackupInput {
     private val closed = AtomicBoolean()
 
-    internal suspend fun <T> rows(section: BackupSection, serializer: DeserializationStrategy<T>, consume: suspend (T) -> Unit) {
+    override suspend fun <T> rows(section: BackupSection, serializer: DeserializationStrategy<T>, consume: suspend (T) -> Unit) {
         check(!closed.get()) { "备份预览已经关闭，请重新选择文件" }
         val entry = zip.entries().asSequence().firstOrNull { BackupSection.of(it.name) == section } ?: return
         zip.getInputStream(entry).use { input ->
@@ -49,9 +51,7 @@ class DesktopBackupArchive private constructor(
     companion object {
         internal const val MAX_ARCHIVE_BYTES = 512L * 1024 * 1024
         internal const val MAX_EXPANDED_BYTES = 1024L * 1024 * 1024
-        internal val supported = setOf(BackupSection.CONTENTS, BackupSection.CATEGORIES, BackupSection.FAVOURITES,
-            BackupSection.HISTORY, BackupSection.SOURCES, BackupSection.WORK_FAVOURITES, BackupSection.WORK_HISTORY,
-            BackupSection.BOOKMARKS, BackupSection.STATS, BackupSection.WORK_STATS)
+        internal val supported = LibraryBackup.supportedSections
 
         internal suspend fun open(path: Path): DesktopBackupArchive {
             val snapshot = Files.createTempFile("kototoro-backup-", ".zip")
@@ -100,28 +100,10 @@ class DesktopBackupArchive private constructor(
                 }
                 require(indices.size == 1) { "备份索引数量无效" }
                 val index = indices.single()
-                require(index.semanticSchemaVersion in 1..BackupIndex.CURRENT_SYNC_SCHEMA_VERSION &&
-                    index.transportGeneration in 1..BackupIndex.WRITER_GENERATION_V3) { "备份版本尚不支持" }
+                LibraryBackup.requireSupported(index)
                 val archive = DesktopBackupArchive(snapshot, opened, path.fileName.toString(), index, emptyMap(), emptyList())
-                val counts = linkedMapOf<BackupSection, Int>()
-                suspend fun <T> count(section: BackupSection, serializer: DeserializationStrategy<T>, size: (T) -> Int = { 1 }) {
-                    if (section.entryName !in names) return
-                    var count = 0
-                    archive.rows(section, serializer) { count = Math.addExact(count, size(it)) }
-                    counts[section] = count
-                }
-                count(BackupSection.CONTENTS, ContentBackup.serializer())
-                count(BackupSection.CATEGORIES, CategoryBackup.serializer())
-                count(BackupSection.FAVOURITES, FavouriteBackup.serializer())
-                count(BackupSection.HISTORY, HistoryBackup.serializer())
-                count(BackupSection.SOURCES, SourceBackup.serializer())
-                count(BackupSection.WORK_FAVOURITES, WorkFavouriteBackup.serializer())
-                count(BackupSection.WORK_HISTORY, WorkHistoryBackup.serializer())
-                count(BackupSection.BOOKMARKS, BookmarkBackup.serializer()) { it.bookmarks.size }
-                count(BackupSection.STATS, StatisticBackup.serializer())
-                count(BackupSection.WORK_STATS, WorkStatisticBackup.serializer())
-                require(counts.isNotEmpty()) { "备份没有可恢复的图书馆数据或来源节" }
-                return DesktopBackupArchive(snapshot, opened, path.fileName.toString(), index, counts.toMap(), names.filter {
+                val counts = LibraryBackup.count(archive, names.mapNotNull(BackupSection::of).toSet())
+                return DesktopBackupArchive(snapshot, opened, path.fileName.toString(), index, counts, names.filter {
                     BackupSection.of(it) !in supported && BackupSection.of(it) != BackupSection.INDEX
                 })
             } catch (error: Throwable) {

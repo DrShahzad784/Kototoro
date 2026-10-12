@@ -20,7 +20,11 @@ data class SourceLibraryEntry(
     val updatedAt: Long,
     val lastReadAt: Long?,
     val progressPercent: Float?,
+    /** History only: the stored chapter last read, for "continue reading" captions. */
+    val lastChapter: SourceLibraryChapter? = null,
 )
+
+data class SourceLibraryChapter(val title: String, val number: Float)
 
 data class SourceLibraryCategory(val id: Long, val title: String)
 

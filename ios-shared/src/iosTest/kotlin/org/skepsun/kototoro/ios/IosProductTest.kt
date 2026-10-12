@@ -102,6 +102,16 @@ class IosProductTest {
         assertEquals(1200f, reader.scrollOrigin(1, 0f))
         assertTrue(reader.autoScrollDistance(1f, 16) > reader.autoScrollDistance(0.1f, 16))
         assertEquals(1, reader.progress(0f, 1300f).index)
+        // Zooming the strip widens its layout; positions stay in unzoomed pixels so saved progress is unchanged.
+        reader.setZoom(2f)
+        assertEquals(1600f, reader.slots()[0].placements.single().width)
+        assertEquals(2400f, reader.slots()[1].placements.single().y)
+        assertEquals(IosReaderProgress(0, 500f), reader.progress(0f, 1000f))
+        assertEquals(1000f, reader.scrollOrigin(0, 500f))
+        reader.setZoom(10f)
+        assertEquals(3200f, reader.slots()[0].placements.single().width)
+        reader.setZoom(1f)
+        assertEquals(800f, reader.slots()[0].placements.single().width)
         assertEquals(0f, reader.clampPan(100f, 0f, 800f, 800f, 1f))
         val tallSize = reader.decodeSize(800, 12000)
         assertTrue(tallSize.height > 4096 && tallSize.width.toLong() * tallSize.height <= IosReader.MAXIMUM_PIXELS)
@@ -123,6 +133,54 @@ class IosProductTest {
     }
 
     @Test
+    fun downloadArchivePreservesSourceOwnedFieldsAndRejectsMismatchedSources() {
+        val codec = IosDownloadArchive()
+        val encoded = codec.encode(IosSourceContent(content), IosSourceChapter(chapter))
+        val restored = codec.decode(encoded)
+        assertEquals(content.copy(chapters = null), restored.content.value)
+        assertEquals(chapter, restored.chapter.value)
+        assertEquals(Long.MIN_VALUE.toString(), restored.content.id)
+        assertEquals(Long.MAX_VALUE.toString(), restored.chapter.id)
+        assertFailsWith<IllegalArgumentException> {
+            codec.encode(IosSourceContent(content), IosSourceChapter(chapter.copy(source = source.copy(name = "OTHER"))))
+        }
+        val unsupported = assertFailsWith<IllegalArgumentException> {
+            codec.decode(encoded.dropLast(1) + ""","version":2}""")
+        }
+        assertEquals("下载任务版本尚不支持", unsupported.message)
+    }
+
+    @Test
+    fun novelChaptersDownloadButVideoIsRefused() {
+        val codec = IosDownloadArchive()
+        val novel = content.copy(source = source.copy(contentType = "NOVEL"))
+        val novelChapter = chapter.copy(source = novel.source)
+        assertEquals(novel.copy(chapters = null), codec.decode(codec.encode(IosSourceContent(novel), IosSourceChapter(novelChapter))).content.value)
+        val video = content.copy(source = source.copy(contentType = "VIDEO"))
+        assertFailsWith<IllegalArgumentException> {
+            codec.encode(IosSourceContent(video), IosSourceChapter(chapter.copy(source = video.source)))
+        }
+    }
+
+    @Test
+    fun chapterTextArchiveKeepsHtmlPicturesAndHeaders() {
+        val text = IosChapterText(
+            SourceChapterContent(
+                "<p>第一段</p><img src=\"https://img.invalid/1.jpg\">",
+                listOf(SourceContentImage("https://img.invalid/1.jpg", mapOf("Referer" to "https://novel.invalid/"))),
+            ),
+        )
+        val archive = IosChapterTextArchive()
+        val restored = archive.decode(archive.encode(text))
+        assertEquals(text.html, restored.html)
+        assertEquals(listOf("https://img.invalid/1.jpg"), restored.images)
+        assertEquals(mapOf("Referer" to "https://novel.invalid/"), restored.headers("https://img.invalid/1.jpg"))
+        assertEquals(emptyMap(), restored.headers("https://img.invalid/other.jpg"))
+        val stored = archive.encode(text)
+        assertFailsWith<IllegalArgumentException> { archive.decode(stored.dropLast(1) + ""","version":2}""") }
+    }
+
+    @Test
     fun repositoryDecoderPersistsAndRejectsIdentityChange() = runBlocking {
         withDatabase { path ->
             val library = IosLibrary(path)
@@ -132,6 +190,8 @@ class IosProductTest {
                 val catalog = repositories.decode(bytes, false, "https://fixture.invalid/repo/index.min.json", "MIHON")
                 assertEquals("9007199254740993", catalog.rows.single().sources.single().id.toString())
                 assertEquals("apk/test.apk", catalog.extensions.single().url)
+                assertEquals(listOf("漫画"), catalog.extensions.single().sourceNames)
+                assertEquals("icon/test.extension.png", catalog.extensions.single().iconUrl)
                 repositories.save(catalog, "a".repeat(64))
                 repositories.save(catalog, "a".repeat(64))
                 assertEquals(1, repositories.saved().size)

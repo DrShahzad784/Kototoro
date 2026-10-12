@@ -28,6 +28,25 @@ data class IosReaderTile(
     val decodeHeight: Int,
 )
 
+/**
+ * How one paged slot looks during a turn ([PageTurnTransition]): [shift] moves it along the paging axis by a fraction
+ * of the page in reading order (cancelling its scroll travel when it stays put), and a folding page draws its front on
+ * the [keepX]/[keepY] side of the fold line through ([topX], [topY]) and ([bottomX], [bottomY]) with its back mirrored
+ * across that line. Points are page-local and physical.
+ */
+data class IosPageTurn(
+    val shift: Float,
+    val alpha: Float,
+    val shade: Float,
+    val folding: Boolean,
+    val topX: Float = 0f,
+    val topY: Float = 0f,
+    val bottomX: Float = 0f,
+    val bottomY: Float = 0f,
+    val keepX: Float = 0f,
+    val keepY: Float = 0f,
+)
+
 /** Geometry and reading semantics stay in reader-core; SwiftUI owns pixels, gestures and native scrolling. */
 class IosReader {
     private var scene: MutableReaderScene? = null
@@ -41,6 +60,8 @@ class IosReader {
     private var cover = false
     private var fit = 0
     private var splitWide = false
+    /** Continuous modes' cross-axis zoom: the strip is laid out this many times wider (taller for mode 4). */
+    private var zoom = 1f
 
     fun configure(count: Int, width: Int, height: Int, mode: Int, doublePage: Boolean, cover: Boolean, fit: Int) =
         configure(count, width, height, mode, doublePage, cover, fit, false)
@@ -60,6 +81,18 @@ class IosReader {
         this.mode = mode; this.doublePage = doublePage; this.cover = cover; this.fit = fit; this.splitWide = splitWide
         sizes.keys.retainAll(0 until count)
         rebuild()
+    }
+
+    /**
+     * Zooms a continuous strip by laying it out again at [zoom] × the viewport's cross axis, so pages decode and tile
+     * for the size they are shown at and the scroll view pans the extra width natively. Offsets in [progress] and
+     * [scrollOrigin] stay in unzoomed pixels, so saved positions do not depend on the zoom. Paged modes ignore it.
+     */
+    fun setZoom(zoom: Float) {
+        val value = zoom.coerceIn(MINIMUM_ZOOM, MAXIMUM_ZOOM)
+        if (value == this.zoom) return
+        this.zoom = value
+        if (mode >= 3) rebuild()
     }
 
     fun reset() { sizes.clear(); specLookup.clear(); scene = null; count = 0 }
@@ -82,8 +115,8 @@ class IosReader {
         val direction = if (mode == 1 || mode == 4) SceneReadingDirection.RIGHT_TO_LEFT else
             if (mode == 2 || mode == 3) SceneReadingDirection.TOP_TO_BOTTOM else SceneReadingDirection.LEFT_TO_RIGHT
         scene = when (mode) {
-            3 -> VerticalReaderScene(width, height, pages)
-            4 -> HorizontalReaderScene(height, width, pages, readingDirection = direction)
+            3 -> VerticalReaderScene(zoomed(width), height, pages)
+            4 -> HorizontalReaderScene(zoomed(height), width, pages, readingDirection = direction)
             else -> {
                 val specs = mutableListOf<PagedPageSpec>()
                 pages.forEachIndexed { index, (id, hint) ->
@@ -115,6 +148,8 @@ class IosReader {
         }
     }
 
+    private fun zoomed(extent: Int): Int = (extent * zoom).toInt().coerceAtLeast(1)
+
     fun slots(): List<IosReaderSlot> {
         val current = scene ?: return emptyList()
         return if (current is PagedReaderScene) current.allSlots.map { slot ->
@@ -135,7 +170,7 @@ class IosReader {
         val frame = scene?.resolve(ReaderViewport(FloatRect.fromLtwh(x, y, width.toFloat(), height.toFloat())))
         val rawId = frame?.progress?.activePageId?.value ?: 0L
         val pageIndex = specLookup[rawId]?.first ?: rawId.toInt()
-        return IosReaderProgress(pageIndex, frame?.progress?.intraPageOffsetPx ?: 0f)
+        return IosReaderProgress(pageIndex, (frame?.progress?.intraPageOffsetPx ?: 0f) / continuousZoom)
     }
 
     fun decodeSize(width: Int, height: Int): IosReaderSize {
@@ -208,16 +243,77 @@ class IosReader {
         }
     }
 
+    /**
+     * The turn of [slot] while the pager rests on or travels from [anchorSlot] to [position] (slots in reading order).
+     * [style] is Android's `ReaderAnimation` ordinal (`NONE`, `DEFAULT`, `ADVANCED`, `SIMULATION`); [mirrored] is
+     * right-to-left reading, where pages fold from the physical left edge. [downY] is where the finger went down, as a
+     * fraction of the page across the paging axis.
+     */
+    fun pageTurn(
+        style: Int,
+        slot: Int,
+        position: Float,
+        anchorSlot: Int,
+        scrolling: Boolean,
+        width: Float,
+        height: Float,
+        vertical: Boolean,
+        mirrored: Boolean,
+        downY: Float = 0.5f,
+    ): IosPageTurn {
+        val turn = when (style) {
+            2 -> PageTurnStyle.COVER
+            3 -> PageTurnStyle.CURL
+            else -> return IosPageTurn(0f, 1f, 0f, false)
+        }
+        val nearest = kotlin.math.round(position).toInt()
+        val motion = PagedMotionSnapshot(
+            currentSlot = nearest, settledSlot = anchorSlot, targetSlot = nearest,
+            offsetFraction = position - nearest, isScrollInProgress = scrolling,
+        )
+        // Reading-order semantics: SwiftUI mirrors the pager for right-to-left reading itself.
+        val input = PagedTransitionResolver.resolve(motion, slot, SceneReadingDirection.LEFT_TO_RIGHT)
+        val transform = PageTurnTransition.transformFor(turn, input, vertical, isReversed = false)
+        val shift = when (turn) {
+            PageTurnStyle.COVER -> if (PageTurnTransition.activeCoverPinnedSlot(motion) == slot) -input.pageOffset else 0f
+            else -> transform.translationFactor
+        }
+        val geometry = PageTurnTransition.curlGeometry(
+            width = width,
+            height = height,
+            transform = transform,
+            downFraction = if (vertical) PagePoint(downY, 0.5f) else PagePoint(0.5f, downY),
+            isVertical = vertical,
+            isReversed = mirrored && !vertical,
+        ) ?: return IosPageTurn(shift, transform.alpha, transform.revealedPageShade, false)
+        val front = geometry.frontPath
+        return IosPageTurn(
+            shift = shift,
+            alpha = transform.alpha,
+            shade = transform.revealedPageShade,
+            folding = true,
+            topX = geometry.topCurlOffset.x,
+            topY = geometry.topCurlOffset.y,
+            bottomX = geometry.bottomCurlOffset.x,
+            bottomY = geometry.bottomCurlOffset.y,
+            // The front polygon starts at the page corner the fold travels towards; its centre is always kept.
+            keepX = front.sumOf { it.x.toDouble() }.toFloat() / front.size,
+            keepY = front.sumOf { it.y.toDouble() }.toFloat() / front.size,
+        )
+    }
+
     fun clampPan(value: Float, contentMin: Float, contentMax: Float, viewport: Float, scale: Float): Float =
         value.coerceIn(PagedPanBoundsResolver.resolvePanRange(contentMin, contentMax, viewport, scale.coerceAtLeast(1f)))
 
     fun autoScrollDelay(speed: Float): Long = ReaderAutoScroll.pageSwitchDelayMs(speed)
 
     fun scrollOrigin(index: Int, offset: Float): Float = scene?.resolveViewportOriginForPage(
-        PageId(index.toLong()), if (mode == 3) height.toFloat() else width.toFloat(), offset,
+        PageId(index.toLong()), if (mode == 3) height.toFloat() else width.toFloat(), offset * continuousZoom,
     )?.coerceIn(0f, scrollLimit()) ?: 0f
 
     fun scrollLimit(): Float = ((scene?.totalSceneExtent ?: 0f) - if (mode == 3) height else width).coerceAtLeast(0f)
+
+    private val continuousZoom: Float get() = if (mode >= 3) zoom else 1f
 
     fun autoScrollDistance(speed: Float, elapsedMillis: Int): Float =
         elapsedMillis.coerceAtLeast(0).toFloat() * ReaderAutoScroll.speedMultiplier(speed) / 32f
@@ -225,5 +321,7 @@ class IosReader {
     companion object {
         const val MAXIMUM_PIXELS = 4L * 1024 * 1024
         const val MAXIMUM_DIMENSION = 16384
+        const val MINIMUM_ZOOM = 1f
+        const val MAXIMUM_ZOOM = 4f
     }
 }

@@ -1,0 +1,418 @@
+import KototoroShared
+import SwiftUI
+
+/// The user's languages for default source selection: multilingual extensions start with only these enabled.
+enum SourceLanguage {
+    static let preferred: Set<String> = Set(Locale.preferredLanguages.prefix(3).compactMap { code(of: $0) })
+
+    /// Language-agnostic ("all"/"multi"/empty) and the user's own languages.
+    static func isUserLanguage(_ locale: String) -> Bool {
+        let value = locale.lowercased()
+        if value.isEmpty || value == "all" || value == "multi" || value == "other" { return true }
+        return code(of: value).map(preferred.contains) ?? false
+    }
+
+    static func code(of identifier: String) -> String? {
+        let normalized = identifier.replacingOccurrences(of: "_", with: "-")
+        return Locale(identifier: normalized).language.languageCode?.identifier.lowercased()
+            ?? normalized.split(separator: "-").first.map { String($0).lowercased() }
+    }
+
+    static func title(_ locale: String) -> String {
+        let value = locale.lowercased()
+        if value.isEmpty || value == "all" || value == "multi" { return "多语言" }
+        return Locale.current.localizedString(forIdentifier: locale.replacingOccurrences(of: "_", with: "-")) ?? locale
+    }
+}
+
+/// Browse source kinds (content) and ecosystems (where a source comes from), for filtering the source list.
+enum SourceFilterOption {
+    static let kinds: [(id: String, title: String, icon: String)] = [
+        ("MANGA", "漫画", "book.closed"), ("NOVEL", "小说", "text.book.closed"), ("VIDEO", "视频", "play.rectangle"),
+    ]
+
+    static func ecosystemKey(_ source: IosSource) -> String { source.kind == "video" ? "TVBOX" : source.ecosystem }
+
+    /// Stored as comma-separated keys of what is hidden, so new kinds and ecosystems show by default.
+    static func decode(_ stored: String) -> Set<String> { Set(stored.split(separator: ",").map(String.init)) }
+    static func encode(_ hidden: Set<String>) -> String { hidden.sorted().joined(separator: ",") }
+}
+
+/// Per-page content-type switch (全部 · 漫画 · 小说 · 视频), used while content spaces are turned off. Pages show it
+/// only while they hold more than one kind, and a stored kind that is no longer present filters nothing.
+struct ContentKindPicker: View {
+    @Binding var selection: String
+    let available: Set<String>
+
+    var body: some View {
+        Picker("内容类型", selection: $selection) {
+            Text("全部").tag("")
+            ForEach(SourceFilterOption.kinds.filter { available.contains($0.id) }, id: \.id) { kind in
+                Text(kind.title).tag(kind.id)
+            }
+        }
+        .pickerStyle(.segmented)
+        .accessibilityIdentifier("contentKind")
+    }
+
+    static func isShown(_ available: Set<String>) -> Bool { available.count > 1 }
+
+    /// The kind to filter by, or nil for every kind.
+    static func effective(_ selection: String, available: Set<String>) -> String? {
+        isShown(available) && available.contains(selection) ? selection : nil
+    }
+}
+
+/// Android's media spaces, built in: one app-wide choice of what the browse, library and history pages show.
+enum ContentSpace {
+    static let key = "space.kind"
+    /// Spaces can be turned off; pages then switch content types on their own ([ContentKindPicker]).
+    static let enabledKey = "space.enabled"
+
+    /// What a page filters by: the app-wide space while spaces are on, otherwise the page's own switch.
+    static func filter(enabled: Bool, space: String, page: String, available: Set<String>) -> String? {
+        enabled ? (space.isEmpty ? nil : space) : ContentKindPicker.effective(page, available: available)
+    }
+
+    static func title(_ kind: String) -> String {
+        SourceFilterOption.kinds.first { $0.id == kind }?.title ?? "全部"
+    }
+
+    static func icon(_ kind: String) -> String {
+        SourceFilterOption.kinds.first { $0.id == kind }?.icon ?? "square.stack"
+    }
+
+    static func matches(_ kind: String, _ mediaKind: String) -> Bool { kind.isEmpty || kind == mediaKind }
+
+    /// The latest history entry the app-wide space admits; every kind while spaces are off.
+    static func latest(in history: [IosLibraryEntry], enabled: Bool, space: String) -> IosLibraryEntry? {
+        history.first { !enabled || matches(space, $0.content.mediaKind) }
+    }
+
+    /// Under the page title while a space narrows it, as Android names the active space in its top bar.
+    static func subtitle(_ kind: String) -> String { kind.isEmpty ? "" : "\(title(kind))空间" }
+}
+
+/// The shared space panel, presented from each root page's trailing toolbar.
+struct SpaceMenu: View {
+    @AppStorage(ContentSpace.key) private var kind = ""
+    @EnvironmentObject private var library: LibraryModel
+    @EnvironmentObject private var sources: SourcesModel
+    @State private var presented = false
+    @State private var pendingResume: CategoryContent?
+    @State private var opened: CategoryContent?
+
+    var body: some View {
+        Button { presented = true } label: {
+            Label("内容空间：\(ContentSpace.title(kind))", systemImage: ContentSpace.icon(kind))
+        }
+        .accessibilityIdentifier("space.menu")
+        .sheet(isPresented: $presented, onDismiss: {
+            // Present the reader only after the panel has finished dismissing.
+            opened = pendingResume
+            pendingResume = nil
+        }) {
+            ContentSpacePanel(selection: $kind) { entry in
+                pendingResume = CategoryContent(content: entry.content)
+                presented = false
+            }
+            .environmentObject(library)
+            .environmentObject(sources)
+            .presentationDetents([.large])
+            .presentationDragIndicator(.visible)
+        }
+        .continueReadingPresentation(opened: $opened)
+    }
+}
+
+private struct ContentSpacePanel: View {
+    @Binding var selection: String
+    let resume: (IosLibraryEntry) -> Void
+    @EnvironmentObject private var library: LibraryModel
+    @EnvironmentObject private var sources: SourcesModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 14) {
+                    card("")
+                    ForEach(SourceFilterOption.kinds, id: \.id) { kind in card(kind.id) }
+                }
+                .padding()
+            }
+            .background(Color(uiColor: .systemGroupedBackground))
+            .navigationTitle("内容空间")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") { dismiss() }.accessibilityIdentifier("space.close")
+                }
+            }
+            .task { await library.refresh() }
+        }
+        .accessibilityIdentifier("space.panel")
+    }
+
+    private func card(_ kind: String) -> some View {
+        let selected = selection == kind
+        let latest = library.history.first { ContentSpace.matches(kind, $0.content.mediaKind) }
+        let favourites = library.favourites.filter { ContentSpace.matches(kind, $0.content.mediaKind) }.count
+        let sourceCount = sources.sources.filter {
+            sources.isEnabled($0) && ContentSpace.matches(kind, $0.mediaKind)
+        }.count
+        let id = kind.isEmpty ? "ALL" : kind
+        return VStack(alignment: .leading, spacing: 0) {
+            Button {
+                selection = kind
+                dismiss()
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: ContentSpace.icon(kind))
+                        .font(.title2)
+                        .foregroundStyle(Color.accentColor)
+                        .frame(width: 42, height: 42)
+                        .background(Color.accentColor.opacity(0.1), in: RoundedRectangle(cornerRadius: 12))
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(ContentSpace.title(kind)).font(.headline)
+                        Text("\(sourceCount) 个来源 · \(favourites) 个收藏")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 8)
+                    if selected {
+                        Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.accentColor)
+                    }
+                }
+                .padding(14)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("space.select.\(id)")
+            .accessibilityAddTraits(selected ? .isSelected : [])
+
+            // The all-content choice is an overview; resume belongs to the individual media spaces.
+            if !kind.isEmpty {
+                Divider().padding(.horizontal, 14)
+                if let latest {
+                    Button {
+                        selection = kind
+                        resume(latest)
+                    } label: {
+                        HStack(spacing: 10) {
+                            if let runtime = sources.runtime {
+                                CoverImage(runtime: runtime, content: latest.content, plain: true)
+                                    .frame(width: 34, height: 46)
+                                    .clipShape(RoundedRectangle(cornerRadius: 5))
+                            }
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(latest.content.title).font(.subheadline.weight(.medium)).lineLimit(1)
+                                Text(ContinueReadingDetail.text(latest))
+                                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                            }
+                            Spacer(minLength: 8)
+                            Image(systemName: kind == "VIDEO" ? "play.fill" : "book.fill")
+                                .foregroundStyle(Color.accentColor)
+                        }
+                        .padding(14)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(sources.runtime == nil)
+                    .accessibilityLabel(
+                        "\(ContentSpace.title(kind))空间，\(ContinueReadingDetail.text(latest))：\(latest.content.title)"
+                    )
+                    .accessibilityIdentifier("space.resume.\(id)")
+                } else {
+                    Label("暂无阅读记录", systemImage: "clock")
+                        .font(.caption).foregroundStyle(.secondary).padding(14)
+                        .accessibilityIdentifier("space.empty.\(id)")
+                }
+            }
+        }
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 20))
+        .overlay {
+            RoundedRectangle(cornerRadius: 20)
+                .strokeBorder(selected ? Color.accentColor : Color.primary.opacity(0.08), lineWidth: selected ? 2 : 0.5)
+        }
+    }
+}
+
+/// Settings switch between app-wide spaces and per-page content-type switches.
+struct ContentSpaceSettingsSection: View {
+    @AppStorage(ContentSpace.enabledKey) private var enabled = true
+
+    var body: some View {
+        Section {
+            Toggle("内容空间", isOn: $enabled).accessibilityIdentifier("settings.spaces")
+        } footer: {
+            Text(enabled ? "浏览、作品库与记录共用右上角的空间选择。"
+                         : "各页面在顶部分别切换内容类型。")
+        }
+    }
+}
+
+/// Shown when the active space leaves a page empty while other spaces have content.
+struct SpaceEmptyView: View {
+    @AppStorage(ContentSpace.key) private var kind = ""
+    let what: String
+
+    var body: some View {
+        ContentUnavailableView {
+            Label("\(ContentSpace.title(kind))空间没有\(what)", systemImage: ContentSpace.icon(kind))
+        } description: {
+            Text("其他内容空间里还有\(what)。")
+        } actions: {
+            Button("显示全部") { kind = "" }.buttonStyle(.glass).accessibilityIdentifier("space.showAll")
+        }
+    }
+}
+
+/// One source with its on/off switch, used by the management tab and extension details.
+struct SourceToggleRow: View {
+    let source: IosSource
+    @EnvironmentObject private var sources: SourcesModel
+
+    var body: some View {
+        Toggle(isOn: Binding(get: { sources.isEnabled(source) },
+                             set: { value in Task { await sources.setEnabled([source], value) } })) {
+            HStack(spacing: 10) {
+                SourceIcon(runtime: sources.runtime, source: source, size: 28)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(source.title).lineLimit(1)
+                    Text([source.kind == "video" ? "影视站点" : SourceLanguage.title(source.locale),
+                          SourcesView.kindName(source.mediaKind)].joined(separator: " · "))
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+        }
+        .accessibilityIdentifier("source.toggle.\(source.name)")
+    }
+}
+
+/// Section header with the group's enabled count and bulk actions.
+struct SourceGroupHeader: View {
+    let title: String
+    let members: [IosSource]
+    @EnvironmentObject private var sources: SourcesModel
+
+    var body: some View {
+        let enabled = members.filter(sources.isEnabled).count
+        HStack {
+            Text(title).lineLimit(1)
+            Text("\(enabled)/\(members.count)").monospacedDigit().foregroundStyle(.secondary)
+            Spacer()
+            Menu {
+                Button("全部开启", systemImage: "checkmark.circle") { Task { await sources.setEnabled(members, true) } }
+                Button("全部关闭", systemImage: "circle") { Task { await sources.setEnabled(members, false) } }
+                Button("仅开启我的语言", systemImage: "globe") {
+                    Task {
+                        let mine = members.filter { SourceLanguage.isUserLanguage($0.locale) }
+                        await sources.setEnabled(mine, true)
+                        await sources.setEnabled(members.filter { !SourceLanguage.isUserLanguage($0.locale) }, false)
+                    }
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle").imageScale(.large)
+            }
+            .textCase(nil)
+            .accessibilityIdentifier("source.group.\(title)")
+        }
+    }
+}
+
+/// Compact tile for the browse grid layout.
+struct SourceTile: View {
+    let source: IosSource
+    @EnvironmentObject private var sources: SourcesModel
+
+    var body: some View {
+        VStack(spacing: 6) {
+            SourceIcon(runtime: sources.runtime, source: source, size: 48)
+            Text(source.title)
+                .font(.caption.weight(.medium))
+                .lineLimit(2, reservesSpace: true)
+                .multilineTextAlignment(.center)
+            Text(source.kind == "video" ? "影视" : SourceLanguage.title(source.locale))
+                .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            if sources.isNewSource(source) { SourceNewBadge() }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 12).padding(.horizontal, 6)
+        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+}
+
+struct SourceNewBadge: View {
+    var body: some View {
+        Text("新")
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.tint)
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(Color.accentColor.opacity(0.12), in: Capsule())
+            .accessibilityLabel("本版本新来源")
+    }
+}
+
+/// Drag to arrange the browse order (all enabled sources; pinned ones stay in their own section on top).
+struct SourceOrderSheet: View {
+    @EnvironmentObject private var sources: SourcesModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var pinned: [IosSource] = []
+    @State private var others: [IosSource] = []
+    @State private var saving = false
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if !pinned.isEmpty {
+                    Section("置顶") {
+                        ForEach(pinned, id: \.name) { row($0) }
+                            .onMove { pinned.move(fromOffsets: $0, toOffset: $1) }
+                    }
+                }
+                Section {
+                    ForEach(others, id: \.name) { row($0) }
+                        .onMove { others.move(fromOffsets: $0, toOffset: $1) }
+                } footer: {
+                    Text("拖动调整浏览页中的来源顺序；分组时各组内保持这个顺序。")
+                }
+            }
+            .environment(\.editMode, .constant(.active))
+            .navigationTitle("调整来源顺序")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") {
+                        saving = true
+                        Task {
+                            await sources.saveOrder(pinned + others)
+                            saving = false
+                            dismiss()
+                        }
+                    }
+                    .disabled(saving)
+                    .accessibilityIdentifier("sources.reorder.done")
+                }
+            }
+            .onAppear {
+                let enabled = sources.ordered(sources.sources.filter(sources.isEnabled))
+                pinned = enabled.filter(sources.isPinned)
+                others = enabled.filter { !sources.isPinned($0) }
+            }
+        }
+    }
+
+    private func row(_ source: IosSource) -> some View {
+        HStack(spacing: 10) {
+            SourceIcon(runtime: sources.runtime, source: source, size: 28)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(source.title).lineLimit(1)
+                Text(source.kind == "video" ? "影视站点" : SourceLanguage.title(source.locale))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityIdentifier("sources.order.\(source.name)")
+    }
+}

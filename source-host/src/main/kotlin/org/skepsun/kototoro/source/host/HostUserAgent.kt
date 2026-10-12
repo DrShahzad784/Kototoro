@@ -17,6 +17,8 @@ import java.lang.reflect.InvocationTargetException
  */
 internal object HostUserAgent {
     const val NODE_ID = "host:user_agent"
+    /** Rows the host adds to every HTTP extension's settings ([HostDomain] included); updates come here. */
+    val HOST_NODES = setOf(NODE_ID, HostDomain.NODE_ID)
     const val KEY = "user_agent"
     private const val HEADER = "User-Agent"
     private val stateOwner = Any()
@@ -34,6 +36,7 @@ internal object HostUserAgent {
 
     /** Installs the stored override if it changed since the last call; cheap when nothing changed. */
     fun apply(lease: MihonJarRegistry.SourceLease, context: Any) {
+        runCatching { HostDomain.apply(lease, context) }
         val applied = lease.state(stateOwner) { Applied() }
         val wanted = stored(lease, context)
         if (wanted == applied.value || !applied.supported) return
@@ -55,7 +58,9 @@ internal object HostUserAgent {
     }
 
     /** Saves and installs a new value; an invalid header value is rejected without being stored. */
-    fun update(lease: MihonJarRegistry.SourceLease, context: Any, value: SourcePreferenceValue): SourcePreferenceUpdateStatus {
+    fun update(lease: MihonJarRegistry.SourceLease, context: Any, value: SourcePreferenceValue,
+        nodeId: String = NODE_ID): SourcePreferenceUpdateStatus {
+        if (nodeId == HostDomain.NODE_ID) return HostDomain.update(lease, context, value)
         val text = (value as? SourcePreferenceValue.Text)?.value?.trim() ?: return SourcePreferenceUpdateStatus.REJECTED
         if (text.isNotEmpty() && !isValidHeaderValue(text)) return SourcePreferenceUpdateStatus.REJECTED
         val editor = requireNotNull(MihonReflection.call(preferences(lease, context), "edit"))
@@ -74,7 +79,7 @@ internal object HostUserAgent {
         native: MihonNativePreferences?): SourcePreferenceScreen {
         val extension = native?.definition()
         if (http) runCatching { apply(lease, context) }
-        val host = if (http) listOf(node(lease, context)) else emptyList()
+        val host = if (http) listOf(node(lease, context), HostDomain.node(lease, context)) else emptyList()
         return SourcePreferenceScreen(lease.descriptor.source, extension?.revision ?: HOST_REVISION,
             extension?.nodes.orEmpty() + host)
     }

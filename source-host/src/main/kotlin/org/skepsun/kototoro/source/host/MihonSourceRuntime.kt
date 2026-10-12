@@ -12,6 +12,7 @@ import org.skepsun.kototoro.core.source.SourceChapter
 import org.skepsun.kototoro.core.source.SourceChapterContent
 import org.skepsun.kototoro.core.source.SourceContentImage
 import org.skepsun.kototoro.core.source.SourceContent
+import org.skepsun.kototoro.core.source.SourceBrowserSession
 import org.skepsun.kototoro.core.source.SourceDescriptor
 import org.skepsun.kototoro.core.source.SourceDetailsFetchMode
 import org.skepsun.kototoro.core.source.SourceEcosystem
@@ -80,6 +81,7 @@ class MihonSourceRuntime @JvmOverloads constructor(
             isPreferencesSupported = preferenceContext != null && (MihonNativePreferences.supports(lease) || isHttp(lease)),
             isCoverFetchingSupported = imageStore != null && isHttp(lease),
             isChapterContentSupported = isNovel(lease),
+            homepage = homepage(lease),
         )
     }
 
@@ -90,6 +92,17 @@ class MihonSourceRuntime @JvmOverloads constructor(
     override suspend fun getDynamicFilters(sourceName: String): SourceDynamicFilters = execute(sourceName) { lease, _ ->
         MihonNativeFilters(lease).definition
     }
+
+    override suspend fun browserSession(sourceName: String): SourceBrowserSession = execute(sourceName) { lease, _ ->
+        if (!isHttp(lease)) throw SourceOperationUnsupportedException()
+        HostBrowser.session(lease.instance)
+    }
+
+    override suspend fun importCookies(sourceName: String, url: String, cookies: List<String>): Int =
+        execute(sourceName) { lease, _ ->
+            if (!isHttp(lease)) throw SourceOperationUnsupportedException()
+            HostBrowser.importCookies(lease.instance, url, cookies)
+        }
 
     override suspend fun getPreferences(sourceName: String): SourcePreferenceScreen = execute(sourceName) { lease, session ->
         val context = preferenceContext ?: throw SourceOperationUnsupportedException()
@@ -104,9 +117,9 @@ class MihonSourceRuntime @JvmOverloads constructor(
         sourceName: String, revision: String, nodeId: String, value: SourcePreferenceValue,
     ): SourcePreferenceUpdate = execute(sourceName) { lease, session ->
         val context = preferenceContext ?: throw SourceOperationUnsupportedException()
-        if (nodeId == HostUserAgent.NODE_ID) {
+        if (nodeId in HostUserAgent.HOST_NODES) {
             if (!isHttp(lease)) throw SourceOperationUnsupportedException()
-            val status = HostUserAgent.update(lease, context, value)
+            val status = HostUserAgent.update(lease, context, value, nodeId)
             return@execute SourcePreferenceUpdate(status, HostUserAgent.screen(lease, context, true, session.preferences))
         }
         if (!MihonNativePreferences.supports(lease)) throw SourceOperationUnsupportedException()
@@ -239,33 +252,30 @@ class MihonSourceRuntime @JvmOverloads constructor(
         }
     }
 
-    override suspend fun fetchImage(page: SourcePage): SourceImageArtifact = execute(page.source.name) { lease, session ->
+    override suspend fun fetchImage(page: SourcePage): SourceImageArtifact = fetch(page.source.name) { lease ->
         val store = imageStore ?: throw SourceOperationUnsupportedException()
         if (!isHttp(lease)) throw SourceOperationUnsupportedException()
         val original = page.requestContext ?: legacyPageContext(page) ?: throw SourceInvalidArgumentException()
         if (original.uri != null) throw SourceOperationUnsupportedException()
         val resolved = original.imageUrl?.takeIf(String::isNotBlank) ?: run {
             val unresolved = MihonReflection.create(lease.loader, "Page", original.index, original.url, null, null)
-            invoke(lease, session, "getImageUrl", unresolved) as String
+            MihonReflection.callSuspending(lease, "getImageUrl", unresolved) as String
         }
         if (resolved.isBlank()) throw SourceInvalidArgumentException()
         val native = MihonReflection.create(lease.loader, "Page", original.index, original.url, resolved, null)
-        val response = invoke(lease, session, "getImage", native,
+        val response = MihonReflection.callSuspending(lease, "getImage", native,
             onResult = { MihonImageResponse(requireNotNull(it), lease) },
             onDiscarded = { (it as? MihonImageResponse)?.close() }) as MihonImageResponse
         response.use { it.materialize(store, page.id) }
     }
 
     override suspend fun fetchCover(content: SourceContent, large: Boolean): SourceCoverArtifact =
-        execute(content.source.name) { lease, session ->
+        fetch(content.source.name) { lease ->
             val store = imageStore ?: throw SourceOperationUnsupportedException()
             if (!isHttp(lease)) throw SourceOperationUnsupportedException()
             val url = (if (large) content.largeCoverUrl ?: content.coverUrl else content.coverUrl)
                 ?.takeIf(String::isNotBlank) ?: throw SourceInvalidArgumentException()
-            val request = coverRequest(lease, url)
-            val finished = CompletableDeferred<Unit>()
-            session.execution.pendingCall = finished
-            val response = MihonHttpCall.await(lease, request) { finished.complete(Unit) }
+            val response = MihonHttpCall.await(lease, coverRequest(lease, url)) {}
             response.use { it.materializeCover(store, content.id) }
         }
 
@@ -327,6 +337,22 @@ class MihonSourceRuntime @JvmOverloads constructor(
             }
         }
 
+    /**
+     * Covers and page images bypass the per-source call order, as Android's image loaders call the extension client
+     * concurrently. They neither touch filter state nor wait for a cancelled call; their own leases keep the JAR open
+     * for late callbacks, and concurrency is bounded by the client like Android's loaders.
+     */
+    private suspend fun <T> fetch(sourceName: String, block: suspend (MihonJarRegistry.SourceLease) -> T): T =
+        withContext(Dispatchers.IO) {
+            registry.withSourceSuspending(sourceName) { lease ->
+                try {
+                    block(lease).also { currentCoroutineContext().ensureActive() }
+                } catch (error: LinkageError) {
+                    throw IllegalStateException("Mihon runtime ABI failure", error)
+                }
+            }
+        }
+
     private suspend fun invoke(
         lease: MihonJarRegistry.SourceLease, session: Session, name: String, vararg arguments: Any?,
         onCompleted: () -> Unit = {},
@@ -366,6 +392,10 @@ class MihonSourceRuntime @JvmOverloads constructor(
             '"' -> append("&quot;"); '\'' -> append("&#39;"); else -> append(char)
         }
     }
+
+    private fun homepage(lease: MihonJarRegistry.SourceLease): String? = if (!isHttp(lease)) null else try {
+        (lease.instance.javaClass.getMethod("getBaseUrl").invoke(lease.instance) as? String)?.takeIf(String::isNotBlank)
+    } catch (_: Exception) { null }
 
     private fun isHttp(lease: MihonJarRegistry.SourceLease): Boolean = try {
         Class.forName("eu.kanade.tachiyomi.source.online.HttpSource", false, lease.loader).isInstance(lease.instance)

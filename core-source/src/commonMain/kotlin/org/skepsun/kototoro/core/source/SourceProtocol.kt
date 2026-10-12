@@ -47,6 +47,14 @@ sealed interface SourceCall {
     @Serializable @SerialName("image") data class Image(val page: SourcePage) : SourceCall
     @Serializable @SerialName("cover") data class Cover(val content: SourceContent, val large: Boolean = false) : SourceCall
     @Serializable @SerialName("related") data class Related(val content: SourceContent) : SourceCall
+    /** Where to send the user for browser verification, with the User-Agent the runtime's requests carry. */
+    @Serializable @SerialName("browserSession") data class BrowserSession(val sourceName: String) : SourceCall
+    /** Cookies a browser received for [url] (`Set-Cookie` syntax), e.g. a Cloudflare clearance, for later requests. */
+    @Serializable @SerialName("importCookies") data class ImportCookies(
+        val sourceName: String,
+        val url: String,
+        val cookies: List<String>,
+    ) : SourceCall
 }
 
 @Serializable
@@ -65,7 +73,13 @@ sealed interface SourceResult {
     @Serializable @SerialName("image") data class Image(val artifact: SourceImageArtifact) : SourceResult
     @Serializable @SerialName("cover") data class Cover(val artifact: SourceCoverArtifact) : SourceResult
     @Serializable @SerialName("related") data class Related(val content: List<SourceContent>) : SourceResult
+    @Serializable @SerialName("browserSession") data class BrowserSession(val session: SourceBrowserSession) : SourceResult
+    @Serializable @SerialName("importCookies") data class CookiesImported(val count: Int) : SourceResult
 }
+
+/** [userAgent] is null when the runtime cannot tell; a browser should then keep its own. */
+@Serializable
+data class SourceBrowserSession(val url: String, val userAgent: String? = null)
 
 @Serializable
 enum class SourceErrorCode {
@@ -75,10 +89,17 @@ enum class SourceErrorCode {
     INVALID_ARGUMENT,
     UNSUPPORTED_OPERATION,
     RUNTIME_FAILURE,
+    /** The site answered with a browser challenge (Cloudflare and the like); pass it in a browser, then retry. */
+    CHALLENGE_REQUIRED,
 }
 
 @Serializable
-data class SourceError(val code: SourceErrorCode, val message: String)
+data class SourceError(
+    val code: SourceErrorCode,
+    val message: String,
+    /** [SourceErrorCode.CHALLENGE_REQUIRED] only: the challenged site's origin (scheme and host, no path or query). */
+    val url: String? = null,
+)
 
 @Serializable
 data class SourceResponse(

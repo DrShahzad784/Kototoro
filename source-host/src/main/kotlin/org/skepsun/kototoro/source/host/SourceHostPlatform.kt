@@ -32,6 +32,19 @@ interface SourceHostRuntimePlatform : SourceHostPlatform {
     ): SourceHostRuntimes
 }
 
-class SourceHostRuntimes(val routes: List<RoutedSourceRuntime.Route>, private val owner: Closeable) : Closeable {
+class SourceHostRuntimes(
+    val routes: List<RoutedSourceRuntime.Route>,
+    /** Readable source titles keyed by wire name, for host management replies. */
+    val titles: () -> Map<String, String> = { emptyMap() },
+    /** Sources each loaded plugin provides (by plugin id, including ones another plugin's copy shadows). */
+    val sources: () -> Map<String, List<org.skepsun.kototoro.core.source.SourceRef>> = { emptyMap() },
+    /**
+     * Applies a new plugin set to these live runtimes, calling the publish callback before the change becomes
+     * visible; false asks the host to open a full replacement instead. Loading only the changed plugin keeps
+     * install time and memory flat when large parser plugins are already loaded.
+     */
+    val update: ((List<SourceHostPlugin>, () -> Unit) -> Boolean)? = null,
+    private val owner: Closeable,
+) : Closeable {
     override fun close() = owner.close()
 }

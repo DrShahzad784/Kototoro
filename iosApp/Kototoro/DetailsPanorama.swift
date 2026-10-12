@@ -1,0 +1,132 @@
+import KototoroShared
+import SwiftUI
+
+/// Android's details "panorama cover" presets: blur, fade range and top opacity (percent), per layout.
+enum PanoramaPreset: String, CaseIterable, Identifiable {
+    case clear, balanced, soft
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .clear: "清晰"
+        case .balanced: "均衡"
+        case .soft: "柔和"
+        }
+    }
+
+    func values(_ layout: PanoramaLayout) -> (blur: Double, range: Double, opacity: Double) {
+        switch (self, layout) {
+        case (.clear, .fullScreen): (10, 55, 90)
+        case (.clear, .top): (10, 40, 90)
+        case (.balanced, .fullScreen): (35, 100, 90)
+        case (.balanced, .top): (30, 75, 90)
+        case (.soft, .fullScreen): (60, 100, 90)
+        case (.soft, .top): (55, 100, 90)
+        }
+    }
+}
+
+/// Top banner behind the header (Android's half-screen mode) or the whole page faded into the background.
+enum PanoramaLayout: String, CaseIterable, Identifiable {
+    case top, fullScreen
+    var id: String { rawValue }
+    var title: String { self == .top ? "顶部横幅" : "全屏背景" }
+}
+
+enum PanoramaKeys {
+    static let enabled = "details.panorama"
+    static let preset = "details.panorama.preset"
+    static let layout = "details.panorama.layout"
+    static let animated = "details.panorama.animated"
+    static let scrollLinked = "details.panorama.scrollLinked"
+}
+
+/// The cover as a wide panorama behind the details header. [scrollOffset] is the list's offset from its resting
+/// position: positive scrolls the banner away with the content, negative (pull to refresh) stretches it.
+struct DetailsPanorama: View {
+    let runtime: IosSources
+    let content: IosSourceContent
+    let scrollOffset: CGFloat
+    @AppStorage(PanoramaKeys.preset) private var preset = PanoramaPreset.balanced
+    @AppStorage(PanoramaKeys.layout) private var layout = PanoramaLayout.top
+    @AppStorage(PanoramaKeys.animated) private var animated = true
+    @AppStorage(PanoramaKeys.scrollLinked) private var scrollLinked = true
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var drifting = false
+
+    var body: some View {
+        GeometryReader { geometry in
+            let values = preset.values(layout)
+            let screen = geometry.size.height
+            // The banner reaches down behind the title block and dissolves around the action row.
+            let base = layout == .top ? min(max(geometry.size.width * 0.95, 340), screen * 0.5) : screen
+            let stretch = max(-scrollOffset, 0)
+            let follows = layout == .top && scrollLinked
+            let motion = animated && !reduceMotion
+            CoverImage(runtime: runtime, content: content, plain: true)
+                .frame(width: geometry.size.width, height: base + stretch)
+                .scaleEffect(motion ? (drifting ? 1.16 : 1.1) : 1, anchor: .center) // the pan never shows an edge
+                .offset(x: motion ? (drifting ? 14 : -14) : 0)
+                .blur(radius: values.blur / 100 * 18, opaque: false)
+                .frame(width: geometry.size.width, height: base + stretch)
+                .clipped()
+                .opacity(values.opacity / 100)
+                .mask(Self.fade(range: values.range / 100))
+                .offset(y: follows ? -max(scrollOffset, 0) : 0)
+        }
+        .onAppear { startDrift() }
+        .onChange(of: animated) { _, _ in startDrift() }
+        .accessibilityHidden(true)
+        .allowsHitTesting(false)
+    }
+
+    private func startDrift() {
+        drifting = false
+        guard animated && !reduceMotion else { return }
+        withAnimation(.linear(duration: 22).repeatForever(autoreverses: true)) { drifting = true }
+    }
+
+    /// Opaque at the top, dissolving into the page below; a wider range starts the fade earlier.
+    static func fade(range: Double) -> LinearGradient {
+        let start = 0.82 - (0.82 - 0.18) * min(max(range, 0), 1)
+        let length = 0.96 - start
+        return LinearGradient(stops: [
+            .init(color: .black, location: 0),
+            .init(color: .black, location: start),
+            .init(color: .black.opacity(0.82), location: start + length * 0.35),
+            .init(color: .black.opacity(0.28), location: start + length * 0.70),
+            .init(color: .clear, location: 0.96),
+            .init(color: .clear, location: 1),
+        ], startPoint: .top, endPoint: .bottom)
+    }
+}
+
+/// Settings for the details panorama, mirroring Android's appearance options.
+struct PanoramaSettingsSection: View {
+    @AppStorage(PanoramaKeys.enabled) private var enabled = true
+    @AppStorage(PanoramaKeys.preset) private var preset = PanoramaPreset.balanced
+    @AppStorage(PanoramaKeys.layout) private var layout = PanoramaLayout.top
+    @AppStorage(PanoramaKeys.animated) private var animated = true
+    @AppStorage(PanoramaKeys.scrollLinked) private var scrollLinked = true
+
+    var body: some View {
+        Section {
+            Toggle("全景封面", isOn: $enabled).accessibilityIdentifier("settings.panorama")
+            if enabled {
+                Picker("布局", selection: $layout) {
+                    ForEach(PanoramaLayout.allCases) { Text($0.title).tag($0) }
+                }
+                Picker("效果", selection: $preset) {
+                    ForEach(PanoramaPreset.allCases) { Text($0.title).tag($0) }
+                }
+                Toggle("封面动画", isOn: $animated)
+                if layout == .top { Toggle("跟随滚动", isOn: $scrollLinked) }
+            }
+        } header: {
+            Text("详情页")
+        } footer: {
+            Text(enabled ? "在详情页顶部标题后方显示横幅式的封面背景图；开启“减弱动态效果”时不播放动画。"
+                 : "关闭后使用模糊封面作为页面背景。")
+        }
+    }
+}

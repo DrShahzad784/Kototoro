@@ -1,11 +1,16 @@
 package org.skepsun.kototoro.dex
 
 import com.googlecode.d2j.Method
+import com.googlecode.d2j.converter.IR2JConverter
+import com.googlecode.d2j.dex.ClassVisitorFactory
 import com.googlecode.d2j.dex.Dex2jar
 import com.googlecode.d2j.dex.DexExceptionHandler
+import com.googlecode.d2j.dex.ExDex2Asm
+import com.googlecode.d2j.dex.LambadaNameSafeClassAdapter
+import com.googlecode.d2j.node.DexFileNode
 import com.googlecode.d2j.node.DexMethodNode
 import com.googlecode.d2j.reader.DexFileReader
-import org.objectweb.asm.ClassReader
+import com.googlecode.dex2jar.ir.IrMethod
 import org.objectweb.asm.ClassVisitor
 import org.objectweb.asm.ClassWriter
 import org.objectweb.asm.MethodVisitor
@@ -14,6 +19,10 @@ import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.util.Random
+import java.util.TreeMap
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
@@ -44,7 +53,7 @@ data class DexConversionReport(
 /** Converts every `classes*.dex` of an APK or DEX-only plugin jar into one class-file jar. */
 object DexJarConverter {
     /** Bump when the library or its settings change: converted artifacts are cached under this version. */
-    const val VERSION = 5
+    const val VERSION = 6
 
     private const val MAXIMUM_DEX_BYTES = 128L * 1024 * 1024
     private const val MAXIMUM_BROKEN_RECORDED = 64
@@ -62,11 +71,12 @@ object DexJarConverter {
             val broken = mutableListOf<String>()
             var classes = 0
             var repaired = 0
-            val plan = repairPlan(dexSources)
+            val planned = repairPlan(dexSources)
             ZipOutputStream(Files.newOutputStream(temporary)).use { output ->
                 val written = HashSet<String>()
-                for (bytes in dexSources.dex()) {
-                    val result = translate(bytes, plan, output, written, broken)
+                val nodes = planned.parsed?.let(::sequenceOf) ?: dexSources.dex().map(::parse)
+                for (node in nodes) {
+                    val result = translate(node, planned.plan, output, written, broken)
                     classes += result.classes
                     repaired += result.repaired
                 }
@@ -115,23 +125,36 @@ object DexJarConverter {
         }
     }
 
-    /** Classes may live in any dex file, so the repair is planned over all of them before the first is translated. */
-    private fun repairPlan(dexSources: DexSources): DexRepairPlan {
+    /** [parsed] keeps a single dex file's classes for translation; several are parsed again one at a time. */
+    private class Planned(val plan: DexRepairPlan, val parsed: DexFileNode?)
+
+    /**
+     * Classes may live in any dex file, so the repair is planned over all of them before the first is translated.
+     * Parsing is a third of an interpreter-only conversion (strings are decoded on every reference), so the usual
+     * single-dex input is parsed once; multidex APKs are not all held in memory at the same time.
+     */
+    private fun repairPlan(dexSources: DexSources): Planned {
         val builder = DexRepairPlan.Builder()
-        try {
-            for (bytes in dexSources.dex()) builder.add(bytes)
-            return builder.build()
-        } catch (error: DexConversionException) {
-            throw error
-        } catch (error: Exception) {
-            throw DexConversionException(DexConversionFailure.TRANSLATION_FAILED, error)
+        var parsed: DexFileNode? = null
+        for (bytes in dexSources.dex()) {
+            val node = parse(bytes)
+            builder.add(node)
+            if (dexSources.count == 1) parsed = node
         }
+        return Planned(builder.build(), parsed)
+    }
+
+    /** The reader settings dex2jar used for this converter; the frame/name flags do not affect parsing. */
+    private fun parse(dex: ByteArray): DexFileNode = try {
+        DexFileNode().also { DexFileReader(dex).accept(it, DexFileReader.SKIP_DEBUG or DexFileReader.IGNORE_READ_EXCEPTION) }
+    } catch (error: Exception) {
+        throw DexConversionException(DexConversionFailure.TRANSLATION_FAILED, error)
     }
 
     private class Translated(val classes: Int, val repaired: Int)
 
     private fun translate(
-        dex: ByteArray, plan: DexRepairPlan, output: ZipOutputStream, written: MutableSet<String>, broken: MutableList<String>,
+        node: DexFileNode, plan: DexRepairPlan, output: ZipOutputStream, written: MutableSet<String>, broken: MutableList<String>,
     ): Translated {
         val handler = object : DexExceptionHandler {
             override fun handleFileException(error: Exception) {
@@ -140,75 +163,156 @@ object DexJarConverter {
 
             override fun handleMethodTranslateException(method: Method, node: DexMethodNode, visitor: MethodVisitor, error: Exception) {
                 // dex2jar emits a throwing stub for the method; record it so the caller can see what is degraded.
-                if (broken.size < MAXIMUM_BROKEN_RECORDED) broken += "${method.owner}.${method.name}"
+                synchronized(broken) { if (broken.size < MAXIMUM_BROKEN_RECORDED) broken += "${method.owner}.${method.name}" }
             }
         }
-        // Mobile OpenJDK omits jdk.zipfs. Translate into an ordinary directory and stream the class files into
-        // our ZIP writer instead of asking dex2jar to mount a jar as a filesystem.
-        val converted = Files.createTempDirectory("kototoro-dex-")
         try {
-            // computeFrames: the JVM verifier insists on stack map frames for class versions that dex2jar emits.
-            val reader = DexRepairPlan.Reader(DexFileReader(dex), plan)
-            Dex2jar.from(reader).withExceptionHandler(handler).reUseReg(false).topoLogicalSort().skipDebug(true)
-                .optimizeSynchronized(false).printIR(false).noCode(false).skipExceptions(false).computeFrames(true).dontSanitizeNames(true).to(converted)
+            val repaired = plan.apply(node)
+            // Entries keep dex2jar's directory-walk order (sorted paths).
+            val classes = TreeMap<String, ByteArray>()
+            translateClasses(node, handler) { name, bytes -> synchronized(classes) { classes["$name.class"] = bytes } }
             var count = 0
-            Files.walk(converted).use { files ->
-                for (file in files.filter { Files.isRegularFile(it) }.sorted().iterator()) {
-                    val name = converted.relativize(file).toString().replace('\\', '/')
-                    if (!written.add(name)) continue
-                    output.putNextEntry(ZipEntry(name).apply { time = 0 })
-                    Files.newInputStream(file).use { input ->
-                        if (name.endsWith(".class")) output.write(correctFallbackFrames(input.readBytes()))
-                        else input.copyTo(output)
-                    }
-                    output.closeEntry()
-                    if (name.endsWith(".class")) count++
-                }
+            for ((name, bytes) in classes) {
+                if (!written.add(name)) continue
+                output.putNextEntry(ZipEntry(name).apply { time = 0 })
+                output.write(bytes)
+                output.closeEntry()
+                count++
             }
-            return Translated(count, reader.repaired)
+            return Translated(count, repaired)
         } catch (error: DexConversionException) {
             throw error
         } catch (error: Exception) {
             throw DexConversionException(DexConversionFailure.TRANSLATION_FAILED, error)
-        } finally {
-            Files.walk(converted).use { files ->
-                files.sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
-            }
         }
     }
 
-    /** dex2jar 2.4.38 misspells its unresolved common-parent fallback as java/util/Object. */
-    private fun correctFallbackFrames(bytes: ByteArray): ByteArray {
-        val writer = ClassWriter(0)
-        ClassReader(bytes).accept(object : ClassVisitor(Opcodes.ASM9, writer) {
-            override fun visitMethod(
-                access: Int,
-                name: String,
-                descriptor: String,
-                signature: String?,
-                exceptions: Array<out String>?,
-            ): MethodVisitor =
-                object : MethodVisitor(Opcodes.ASM9, super.visitMethod(access, name, descriptor, signature, exceptions)) {
-                    override fun visitFrame(
-                        type: Int,
-                        numLocal: Int,
-                        local: Array<out Any>?,
-                        numStack: Int,
-                        stack: Array<out Any>?,
-                    ) {
-                        fun corrected(values: Array<out Any>?): Array<Any>? = values?.map { value ->
-                            when {
-                                value == "java/util/Object" -> "java/lang/Object"
-                                value is String && value.startsWith('[') && value.endsWith("Ljava/util/Object;") ->
-                                    value.replace("Ljava/util/Object;", "Ljava/lang/Object;")
-                                else -> value
-                            }
-                        }?.toTypedArray()
-                        super.visitFrame(type, numLocal, corrected(local), numStack, corrected(stack))
+    /**
+     * `Dex2jar.doTranslate` with the settings this converter always used (skip debug info, compute frames, keep
+     * names, no register reuse or synchronized optimisation), except that [LinearRemoveLocalFromSSA] replaces the
+     * cubic stock pass, the already parsed and repaired classes are translated, and class files are handed over in
+     * memory: Mobile OpenJDK omits jdk.zipfs, and the former temporary directory only cost interpreter time on iOS.
+     */
+    private fun translateClasses(fileNode: DexFileNode, handler: DexExceptionHandler, sink: (String, ByteArray) -> Unit) {
+        // The helper method prefix for long hex strings comes from this shared generator: reset it so a conversion
+        // does not depend on what the process translated before.
+        Dex2jar.random = Random(0)
+        val parentsByName = HashMap<String, String>()
+        for (clz in fileNode.clzs) {
+            val parent = clz.superClass ?: continue
+            parentsByName[internalName(clz.className)] = internalName(parent)
+        }
+        val factory = ClassVisitorFactory {
+            // computeFrames: the JVM verifier insists on stack map frames for class versions that dex2jar emits.
+            val writer = FrameClassWriter(parentsByName)
+            val adapter = LambadaNameSafeClassAdapter(writer, true)
+            object : ClassVisitor(Opcodes.ASM9, adapter) {
+                override fun visitEnd() {
+                    super.visitEnd()
+                    val bytes = try {
+                        writer.toByteArray()
+                    } catch (error: Exception) {
+                        handler.handleFileException(error)
+                        return
                     }
+                    sink(adapter.className, bytes)
                 }
-        }, 0)
-        return writer.toByteArray()
+            }
+        }
+        val clzs = fileNode.clzs ?: return
+        val info = Translator.classInfo(fileNode)
+        // Classes translate independently (dex2jar's transformers keep no state), and the iOS JVM only interprets:
+        // a few threads cut the wait for large plugins roughly by the number of cores used.
+        val workers = if (clzs.size < PARALLEL_MINIMUM_CLASSES) 1 else Runtime.getRuntime().availableProcessors().coerceIn(1, MAXIMUM_WORKERS)
+        val next = AtomicInteger()
+        val failure = AtomicReference<Throwable>()
+        fun work() {
+            val translator = Translator(handler)
+            while (failure.get() == null) {
+                val index = next.getAndIncrement()
+                if (index >= clzs.size) return
+                try {
+                    translator.convertClass(fileNode, clzs[index], factory, info)
+                } catch (error: Throwable) {
+                    failure.compareAndSet(null, error)
+                }
+            }
+        }
+        if (workers == 1) work() else {
+            val threads = List(workers - 1) { Thread(::work, "dex-convert-${it + 1}").apply { start() } }
+            work()
+            threads.forEach(Thread::join)
+        }
+        failure.get()?.let { throw it }
+    }
+
+    private const val PARALLEL_MINIMUM_CLASSES = 64
+    private const val MAXIMUM_WORKERS = 4
+
+    private class Translator(handler: DexExceptionHandler) : ExDex2Asm(handler) {
+        override fun optimize(irMethod: IrMethod) {
+            T_CLEAN_LABEL.transform(irMethod)
+            T_DEAD_CODE.transform(irMethod)
+            REMOVE_LOCAL.transform(irMethod)
+            T_REMOVE_CONST.transform(irMethod)
+            T_ZERO.transform(irMethod)
+            if (T_NPE.transformReportChanged(irMethod)) {
+                T_DEAD_CODE.transform(irMethod)
+                REMOVE_LOCAL.transform(irMethod)
+                T_REMOVE_CONST.transform(irMethod)
+            }
+            T_NEW.transform(irMethod)
+            T_FILL_ARRAY.transform(irMethod)
+            T_AGG.transform(irMethod)
+            T_MULTI_ARRAY.transform(irMethod)
+            T_VOID_INVOKE.transform(irMethod)
+            // https://github.com/pxb1988/dex2jar/issues/477: dead code found in unssa, clean up.
+            T_DEAD_CODE.transform(irMethod)
+            REMOVE_LOCAL.transform(irMethod)
+            T_REMOVE_CONST.transform(irMethod)
+            T_TYPE.transform(irMethod)
+            T_UNSSA.transform(irMethod)
+            T_IR_2_J_REG_ASSIGN.transform(irMethod)
+            T_TRIM_EX.transform(irMethod)
+        }
+
+        override fun ir2j(irMethod: IrMethod, mv: MethodVisitor, clzCtx: ClzCtx) {
+            IR2JConverter().optimizeSynchronized(false).clzCtx(clzCtx).ir(irMethod).asm(mv).convert()
+        }
+
+        companion object {
+            /** Inner/enclosing class relations across the whole dex file, shared read-only by the workers. */
+            fun classInfo(node: DexFileNode): Map<String, Clz> = collectClzInfo(node)
+        }
+    }
+
+    private val REMOVE_LOCAL = LinearRemoveLocalFromSSA()
+
+    private fun internalName(descriptor: String): String =
+        if (descriptor.endsWith(";")) descriptor.substring(1, descriptor.length - 1) else descriptor
+
+    /** dex2jar's frame writer: resolves common parents among the translated classes before asking the host. */
+    private class FrameClassWriter(private val parentsByName: Map<String, String>) : ClassWriter(COMPUTE_FRAMES) {
+        override fun getCommonSuperClass(type1: String, type2: String): String {
+            if (type1 == type2) return type1
+            var first = type1
+            val parentsOfFirst = hashSetOf(first)
+            while (true) {
+                first = parentsByName[first] ?: break
+                parentsOfFirst += first
+            }
+            var second = type2
+            while (true) {
+                second = parentsByName[second] ?: break
+                if (second in parentsOfFirst) return second
+            }
+            return try {
+                super.getCommonSuperClass(first, second)
+            } catch (_: Throwable) {
+                // dex2jar 2.4.38 falls back to the misspelt java/util/Object here, which no JVM can load.
+                "java/lang/Object"
+            }
+        }
     }
 
     /** Service registrations survive conversion of a plugin jar; they are tiny and host-relevant. */

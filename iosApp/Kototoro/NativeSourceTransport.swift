@@ -11,13 +11,16 @@ final class NativeSourceTransport: IosSourceTransport {
     private var active = 0
 
     static var isAvailable: Bool { ktr_vm_available() != 0 }
-    private static let storageName: String = {
+    static let isFixtureRuntime: Bool = {
         guard let file = Bundle.main.resourceURL?.appendingPathComponent("jvm/sources/config.json"),
               let bytes = try? Data(contentsOf: file),
               let config = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
-              (config["platformClass"] as? String)?.hasPrefix("fixture.") == true else { return "sources" }
-        return "sources-fixture"
+              (config["platformClass"] as? String)?.hasPrefix("fixture.") == true else { return false }
+        return true
     }()
+    private static let storageName = isFixtureRuntime ? "sources-fixture" : "sources"
+
+    static let fixtureInstallationMessage = "此构建仅包含独立测试源，无法安装真实扩展。请使用包含真实扩展运行时的构建。"
 
     static var dataDirectory: URL {
         get throws {
@@ -25,6 +28,10 @@ final class NativeSourceTransport: IosSourceTransport {
                                         appropriateFor: nil, create: true)
                 .appendingPathComponent("Kototoro/\(storageName)", isDirectory: true)
         }
+    }
+
+    static var downloadQueueFile: URL {
+        URL.applicationSupportDirectory.appendingPathComponent("Kototoro/\(storageName)/downloads/queue.json")
     }
 
     func exchange(requestJson: String) throws -> String {
@@ -98,7 +105,8 @@ final class NativeSourceTransport: IosSourceTransport {
         let data = try Self.dataDirectory
         try FileManager.default.createDirectory(at: data, withIntermediateDirectories: true)
         var options = ["-Djava.io.tmpdir=\(FileManager.default.temporaryDirectory.path)",
-                       "-Duser.home=\(data.path)"]
+                       "-Duser.home=\(data.path)",
+                       "-Xmx\(Self.heapMegabytes)m"]
         let bootShims = runtime.appendingPathComponent("boot-shims.jar")
         if FileManager.default.fileExists(atPath: bootShims.path) {
             options.append("-Xbootclasspath/a:\(bootShims.path)")
@@ -150,6 +158,14 @@ final class NativeSourceTransport: IosSourceTransport {
         }
         defer { ktr_free(openError) }
         guard session != nil else { throw nativeFailure(openError) }
+    }
+
+    /// Parser plugins register every site eagerly (kototoro-parsers alone has ~1,000), so two of them overflow the
+    /// native default of 128 MB. An eighth of physical memory, 256–768 MB, stays well inside the app's memory limit.
+    /// (A later -Xmx overrides the bridge's default.)
+    static var heapMegabytes: Int {
+        let physical = Int(ProcessInfo.processInfo.physicalMemory / 1_048_576)
+        return min(max(physical / 8, 256), 768)
     }
 
     private func nativeFailure(_ error: UnsafeMutablePointer<CChar>?) -> NSError {

@@ -2,11 +2,9 @@ package org.skepsun.kototoro.backups.external
 
 import org.skepsun.kototoro.core.db.entity.MangaEntity
 import org.skepsun.kototoro.core.db.entity.TagEntity
-import org.skepsun.kototoro.core.model.ContentSource
 import org.skepsun.kototoro.core.model.containsAdultTagKeyword
 import org.skepsun.kototoro.core.model.isAdultTagKeyword
 import org.skepsun.kototoro.core.model.isExplicitlySafeTagKeyword
-import org.skepsun.kototoro.core.model.isNsfw
 import org.skepsun.kototoro.parsers.model.ContentRating
 import org.skepsun.kototoro.parsers.model.ContentType
 
@@ -26,6 +24,8 @@ import org.skepsun.kototoro.parsers.model.ContentType
 internal class BulkImportEntry(
     initialRecord: ExternalBackupContentRecord,
     val mangaId: Long,
+    /** The platform's source NSFW rule (overrides, extension flags), by source name. */
+    private val isNsfwSource: (String) -> Boolean,
 ) {
     var record: ExternalBackupContentRecord = initialRecord
         private set
@@ -90,7 +90,7 @@ internal class BulkImportEntry(
             ContentType.HENTAI_NOVEL,
             ContentType.HENTAI_VIDEO,
         )
-        val isAdultSource = ContentSource(record.sourceName).isNsfw()
+        val isAdultSource = isNsfwSource(record.sourceName)
         val hasAdultTag = record.tags.any { it.isAdultTagKeyword() || it.containsAdultTagKeyword() }
 
         val isNsfw = !isExplicitlySafe && (isAdultContentType || isAdultSource || hasAdultTag)

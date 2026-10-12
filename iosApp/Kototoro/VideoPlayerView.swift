@@ -4,8 +4,8 @@ import Combine
 import KototoroShared
 import SwiftUI
 
-/// Resolves an episode through the shared runtime and plays it with the system player (AVPlayerViewController:
-/// native controls, AirPlay, Picture in Picture). Advances to the next episode of the same line at the end.
+/// Resolves an episode through the shared runtime for AVPlayerLayer and the app's controls, with system AirPlay
+/// and Picture in Picture support. Advances to the next episode of the same line at the end.
 @MainActor
 final class VideoPlayerModel: ObservableObject {
     @Published private(set) var chapter: IosSourceChapter
@@ -16,6 +16,29 @@ final class VideoPlayerModel: ObservableObject {
     /// Every playable stream of the episode (Aniyomi qualities/hosters, CMS single stream); the preferred one first.
     @Published private(set) var streams: [IosSourcePage] = []
     @Published private(set) var streamIndex = 0
+    @Published private(set) var duration: Double = 0
+    @Published private(set) var isPlaying = false
+    @Published private(set) var isBuffering = false
+    @Published private(set) var rate: Float = 1
+    /// Audio and subtitle tracks of the current stream (HLS renditions, embedded tracks).
+    @Published private(set) var audioOptions: [AVMediaSelectionOption] = []
+    @Published private(set) var subtitleOptions: [AVMediaSelectionOption] = []
+    @Published private(set) var selectedAudio: AVMediaSelectionOption?
+    @Published private(set) var selectedSubtitle: AVMediaSelectionOption?
+    private var audioGroup: AVMediaSelectionGroup?
+    private var subtitleGroup: AVMediaSelectionGroup?
+    /// Side-loaded subtitles of the current stream (Aniyomi `subtitleTracks`). AVPlayer cannot add a subtitle file to
+    /// an HLS or progressive asset, so their cues are drawn over the video as [subtitleText].
+    @Published private(set) var externalSubtitles: [SubtitleTrack] = []
+    @Published private(set) var selectedExternal: Int?
+    @Published private(set) var failedExternal: Set<Int> = []
+    @Published private(set) var subtitleText: String?
+    private var cues: IosSubtitles?
+    private var cueObserver: Any?
+    private var subtitleTask: Task<Void, Never>?
+    /// The viewer's last choice, kept across streams and episodes of this session.
+    private var subtitlesOff = false
+    private var preferredSubtitle: String?
     let runtime: IosSources
     let content: IosSourceContent
     private var request: UUID?
@@ -78,6 +101,7 @@ final class VideoPlayerModel: ObservableObject {
             return
         }
         error = nil
+        externalSubtitles = streams[index].subtitles.map(SubtitleTrack.init)
         play(url: url, headers: streams[index].headers, from: resume)
     }
 
@@ -95,11 +119,128 @@ final class VideoPlayerModel: ObservableObject {
         }
         if let timeObserver, let player { player.removeTimeObserver(timeObserver) }
         timeObserver = nil
+        clearExternalSubtitle()
         observers.removeAll()
         player?.pause()
         player = nil
         position = 0
+        duration = 0
+        isPlaying = false
         lastSavedAt = 0
+        audioOptions = []; subtitleOptions = []; selectedAudio = nil; selectedSubtitle = nil
+        audioGroup = nil; subtitleGroup = nil
+        externalSubtitles = []
+        failedExternal = []
+    }
+
+    func togglePlay() {
+        guard let player else { return }
+        if player.timeControlStatus == .paused { player.playImmediately(atRate: rate) } else { player.pause() }
+    }
+
+    func seek(to seconds: Double) {
+        guard let player else { return }
+        let target = max(0, duration > 0 ? min(seconds, duration - 0.5) : seconds)
+        position = target
+        player.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
+    func skip(by seconds: Double) { seek(to: position + seconds) }
+
+    func setRate(_ value: Float) {
+        rate = value
+        if let player, player.timeControlStatus != .paused { player.rate = value }
+    }
+
+    func selectAudio(_ option: AVMediaSelectionOption?) {
+        guard let group = audioGroup, let item = player?.currentItem else { return }
+        item.select(option, in: group)
+        selectedAudio = option
+    }
+
+    func selectSubtitle(_ option: AVMediaSelectionOption?) {
+        subtitlesOff = option == nil
+        if option != nil { clearExternalSubtitle() }
+        guard let group = subtitleGroup, let item = player?.currentItem else { return }
+        item.select(option, in: group)
+        selectedSubtitle = option
+    }
+
+    func selectExternalSubtitle(_ index: Int) {
+        guard externalSubtitles.indices.contains(index) else { return }
+        subtitlesOff = false
+        preferredSubtitle = externalSubtitles[index].lang
+        if let group = subtitleGroup, let item = player?.currentItem { item.select(nil, in: group) }
+        selectedSubtitle = nil
+        loadExternalSubtitle(index)
+    }
+
+    /// Embedded subtitles the stream already turns on win; otherwise the viewer's last language, then theirs.
+    private func selectDefaultExternalSubtitle() {
+        guard !subtitlesOff, selectedSubtitle == nil, selectedExternal == nil,
+              let index = SubtitleLanguage.preferredIndex(externalSubtitles.map(\.lang), last: preferredSubtitle)
+        else { return }
+        loadExternalSubtitle(index)
+    }
+
+    private func loadExternalSubtitle(_ index: Int) {
+        clearExternalSubtitle()
+        selectedExternal = index
+        failedExternal.remove(index)
+        let track = externalSubtitles[index]
+        let streamHeaders = streams.indices.contains(streamIndex) ? streams[streamIndex].headers : [:]
+        subtitleTask = Task { [weak self] in
+            do {
+                let text = try await SubtitleFile.download(track, streamHeaders: streamHeaders)
+                let parsed = IosSubtitles.companion.parse(text: text, name: track.url)
+                try Task.checkCancellation()
+                guard let self, self.selectedExternal == index else { return }
+                guard !parsed.isEmpty else { throw URLError(.cannotParseResponse) }
+                self.cues = parsed
+                self.observeCues()
+            } catch {
+                guard !Task.isCancelled, let self, self.selectedExternal == index else { return }
+                self.failedExternal.insert(index)
+                self.selectedExternal = nil
+            }
+        }
+    }
+
+    private func observeCues() {
+        guard let player, cueObserver == nil else { return }
+        // Finer than the progress observer, and publishing only when the shown text changes.
+        cueObserver = player.addPeriodicTimeObserver(forInterval: CMTime(value: 1, timescale: 10), queue: .main) {
+            [weak self] time in
+            MainActor.assumeIsolated {
+                guard let self, let cues = self.cues, time.seconds.isFinite else { return }
+                let text = cues.textAt(ms: Int64(time.seconds * 1000))
+                if text != self.subtitleText { self.subtitleText = text }
+            }
+        }
+    }
+
+    private func clearExternalSubtitle() {
+        subtitleTask?.cancel()
+        subtitleTask = nil
+        if let cueObserver, let player { player.removeTimeObserver(cueObserver) }
+        cueObserver = nil
+        cues = nil
+        selectedExternal = nil
+        subtitleText = nil
+    }
+
+    private func loadTracks(_ item: AVPlayerItem) async {
+        let asset = item.asset
+        let audio = try? await asset.loadMediaSelectionGroup(for: .audible)
+        let legible = try? await asset.loadMediaSelectionGroup(for: .legible)
+        guard player?.currentItem === item else { return }
+        audioGroup = audio
+        subtitleGroup = legible
+        audioOptions = audio?.options ?? []
+        subtitleOptions = legible?.options.filter { !$0.hasMediaCharacteristic(.containsOnlyForcedSubtitles) } ?? []
+        selectedAudio = audio.flatMap { item.currentMediaSelection.selectedMediaOption(in: $0) }
+        selectedSubtitle = legible.flatMap { item.currentMediaSelection.selectedMediaOption(in: $0) }
+        selectDefaultExternalSubtitle()
     }
 
     func persist() async {
@@ -123,6 +264,7 @@ final class VideoPlayerModel: ObservableObject {
             MainActor.assumeIsolated {
                 guard let self, time.seconds.isFinite else { return }
                 self.position = time.seconds
+                if let seconds = player.currentItem?.duration.seconds, seconds.isFinite, seconds > 0 { self.duration = seconds }
                 if abs(self.position - self.lastSavedAt) >= 5 {
                     self.lastSavedAt = self.position
                     Task { await self.persist() }
@@ -136,9 +278,17 @@ final class VideoPlayerModel: ObservableObject {
                 Task { await self.move(to: next) }
             }
             .store(in: &observers)
+        player.publisher(for: \.timeControlStatus)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] status in
+                self?.isPlaying = status != .paused
+                self?.isBuffering = status == .waitingToPlayAtSpecifiedRate
+            }
+            .store(in: &observers)
         item.publisher(for: \.status)
             .receive(on: RunLoop.main)
             .sink { [weak self] status in
+                if status == .readyToPlay { Task { await self?.loadTracks(item) } }
                 guard let self, status == .failed else { return }
                 // Hosters go stale independently; try the episode's next stream before reporting a failure.
                 if self.streamIndex + 1 < self.streams.count {
@@ -150,14 +300,21 @@ final class VideoPlayerModel: ObservableObject {
             .store(in: &observers)
         self.player = player
         if start > 1 { player.seek(to: CMTime(seconds: start, preferredTimescale: 600)) }
-        player.play()
+        player.playImmediately(atRate: rate)
     }
 }
 
+/// One set of controls over the video (no system control bar to collide with): shown on tap, hidden after a few
+/// seconds of playback, always shown while paused. PiP and AirPlay use the system controllers.
 struct VideoPlayerView: View {
     @EnvironmentObject private var library: LibraryModel
     @StateObject private var model: VideoPlayerModel
     @Environment(\.dismiss) private var dismiss
+    @State private var controlsVisible = true
+    @State private var hideTask: Task<Void, Never>?
+    @State private var scrubbing: Double?
+    @State private var fill = false
+    @State private var pip = PictureInPicture()
 
     init(runtime: IosSources, content: IosSourceContent, chapter: IosSourceChapter) {
         _model = StateObject(wrappedValue: VideoPlayerModel(runtime: runtime, content: content, chapter: chapter))
@@ -167,11 +324,17 @@ struct VideoPlayerView: View {
         ZStack {
             Color.black.ignoresSafeArea()
             if let player = model.player {
-                SystemPlayer(player: player)
+                PlayerLayerView(player: player, fill: fill, pip: pip)
                     .ignoresSafeArea()
                     .accessibilityIdentifier("player.view")
             }
-            if model.isLoading { ProgressView().tint(.white).controlSize(.large) }
+            // Taps anywhere toggle the controls; double taps switch between fit and fill.
+            Color.clear
+                .contentShape(Rectangle())
+                .ignoresSafeArea()
+                .onTapGesture(count: 2) { withAnimation(.snappy) { fill.toggle() } }
+                .onTapGesture { setControls(!controlsVisible) }
+            if model.isLoading || model.isBuffering { ProgressView().tint(.white).controlSize(.large).allowsHitTesting(false) }
             if let error = model.error {
                 VStack(spacing: 12) {
                     Label(error, systemImage: "exclamationmark.triangle")
@@ -182,70 +345,214 @@ struct VideoPlayerView: View {
                 }
                 .padding()
             }
+            if controlsVisible {
+                controls.transition(.opacity)
+            }
+            // Above the controls' gradient, which would otherwise dim it; it never takes touches.
+            if let text = model.subtitleText {
+                SubtitleOverlay(text: text, raised: controlsVisible)
+            }
+            // Playback progress for VoiceOver and UI tests, independent of whether the controls are shown.
+            Text("已播放 \(Int(model.position)) 秒")
+                .font(.caption2).opacity(0.01).allowsHitTesting(false)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                .accessibilityIdentifier("player.position")
         }
-        .safeAreaInset(edge: .top) { chrome }
-        .statusBarHidden()
+        .statusBarHidden(!controlsVisible)
+        .persistentSystemOverlays(controlsVisible ? .automatic : .hidden)
         .task { model.library = library.library; await model.load() }
+        .onChange(of: model.isPlaying) { _, playing in if playing { scheduleHide() } else { setControls(true) } }
         .onDisappear { Task { await model.persist(); model.stop(); await library.refresh() } }
     }
 
-    private var chrome: some View {
-        GlassEffectContainer(spacing: 10) {
-            HStack(spacing: 10) {
-                Button("关闭", systemImage: "xmark") { dismiss() }
-                    .labelStyle(.iconOnly)
-                    .buttonStyle(.glass)
-                    .accessibilityIdentifier("player.close")
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(model.content.title).font(.subheadline.weight(.semibold)).lineLimit(1)
-                    Text(SourceDetailsView.episodeTitle(model.chapter)).font(.caption).lineLimit(1)
-                        .accessibilityIdentifier("player.title")
-                }
-                .foregroundStyle(.white)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .glassEffect(.regular, in: .capsule)
-                Spacer(minLength: 0)
-                // Exposed for UI tests and VoiceOver: playback actually advancing, not just a player existing.
-                Text("已播放 \(Int(model.position)) 秒")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.8))
-                    .accessibilityIdentifier("player.position")
-                if model.streams.count > 1 {
-                    Menu {
+    // MARK: Controls
+
+    private var controls: some View {
+        ZStack {
+            LinearGradient(colors: [.black.opacity(0.55), .clear, .clear, .black.opacity(0.65)],
+                           startPoint: .top, endPoint: .bottom)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+            VStack(spacing: 0) {
+                topBar
+                Spacer()
+                centerBar
+                Spacer()
+                bottomBar
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+        }
+        .foregroundStyle(.white)
+    }
+
+    private var topBar: some View {
+        HStack(spacing: 12) {
+            Button("关闭", systemImage: "xmark") { dismiss() }
+                .labelStyle(.iconOnly)
+                .font(.title3.weight(.semibold))
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+                .accessibilityIdentifier("player.close")
+            VStack(alignment: .leading, spacing: 1) {
+                Text(model.content.title).font(.subheadline.weight(.semibold)).lineLimit(1)
+                Text(SourceDetailsView.episodeTitle(model.chapter)).font(.caption).foregroundStyle(.white.opacity(0.8))
+                    .lineLimit(1)
+                    .accessibilityIdentifier("player.title")
+            }
+            Spacer(minLength: 0)
+            AirPlayButton().frame(width: 36, height: 36)
+            if pip.isPossible {
+                Button("画中画", systemImage: "pip.enter") { pip.start() }
+                    .labelStyle(.iconOnly).font(.title3).frame(width: 40, height: 40)
+                    .accessibilityIdentifier("player.pip")
+            }
+            if model.streams.count > 1 {
+                Menu {
+                    Picker("线路", selection: Binding(get: { model.streamIndex }, set: { model.select(stream: $0) })) {
                         ForEach(Array(model.streams.enumerated()), id: \.offset) { index, stream in
-                            Button {
-                                model.select(stream: index)
-                            } label: {
-                                if index == model.streamIndex {
-                                    Label(Self.streamName(stream, index), systemImage: "checkmark")
-                                } else {
-                                    Text(Self.streamName(stream, index))
+                            Text(Self.streamName(stream, index)).tag(index)
+                        }
+                    }
+                } label: {
+                    Label("线路", systemImage: "antenna.radiowaves.left.and.right").labelStyle(.iconOnly)
+                        .font(.title3).frame(width: 40, height: 40)
+                }
+                .accessibilityIdentifier("player.streams")
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var centerBar: some View {
+        HStack(spacing: 36) {
+            if let previous = model.previous {
+                circleButton("上一集", "backward.end.fill", size: 22) { Task { await model.move(to: previous) } }
+                    .accessibilityIdentifier("player.previous")
+            }
+            circleButton("后退 10 秒", "gobackward.10", size: 26) { model.skip(by: -10) }
+            circleButton(model.isPlaying ? "暂停" : "播放", model.isPlaying ? "pause.fill" : "play.fill", size: 40) {
+                model.togglePlay()
+            }
+            .accessibilityIdentifier("player.playPause")
+            circleButton("前进 10 秒", "goforward.10", size: 26) { model.skip(by: 10) }
+            if let next = model.next {
+                circleButton("下一集", "forward.end.fill", size: 22) { Task { await model.move(to: next) } }
+                    .accessibilityIdentifier("player.next")
+            }
+        }
+    }
+
+    private func circleButton(_ title: String, _ icon: String, size: CGFloat, action: @escaping () -> Void) -> some View {
+        Button { action(); scheduleHide() } label: {
+            Image(systemName: icon).font(.system(size: size, weight: .semibold))
+                .frame(width: size * 1.9, height: size * 1.9)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+    }
+
+    private var bottomBar: some View {
+        VStack(spacing: 6) {
+            Slider(value: Binding(get: { scrubbing ?? model.position },
+                                  set: { scrubbing = $0 }),
+                   in: 0...max(model.duration, 1)) { editing in
+                if !editing, let target = scrubbing { model.seek(to: target); scrubbing = nil; scheduleHide() }
+                if editing { hideTask?.cancel() }
+            }
+            .tint(.white)
+            .disabled(model.duration <= 0)
+            .accessibilityIdentifier("player.scrubber")
+            HStack(spacing: 14) {
+                Text(Self.time(scrubbing ?? model.position)).monospacedDigit()
+                Text("/ " + Self.time(model.duration)).monospacedDigit().foregroundStyle(.white.opacity(0.7))
+                Spacer()
+                Menu {
+                    Picker("播放速度", selection: Binding(get: { model.rate }, set: { model.setRate($0) })) {
+                        ForEach([0.5, 0.75, 1, 1.25, 1.5, 2] as [Float], id: \.self) { Text(Self.rateTitle($0)).tag($0) }
+                    }
+                } label: {
+                    Text(Self.rateTitle(model.rate)).font(.footnote.weight(.semibold))
+                        .padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(.white.opacity(0.18), in: .capsule)
+                }
+                .accessibilityIdentifier("player.rate")
+                if !model.audioOptions.isEmpty || !model.subtitleOptions.isEmpty || !model.externalSubtitles.isEmpty {
+                    Menu {
+                        if model.audioOptions.count > 1 {
+                            Picker("音轨", selection: Binding(get: { model.selectedAudio }, set: { model.selectAudio($0) })) {
+                                ForEach(model.audioOptions, id: \.self) { Text($0.displayName).tag(Optional($0)) }
+                            }
+                        }
+                        if !model.subtitleOptions.isEmpty || !model.externalSubtitles.isEmpty {
+                            Picker("字幕", selection: subtitleChoice) {
+                                Text("关闭").tag(SubtitleChoice.off)
+                                ForEach(model.subtitleOptions, id: \.self) { Text($0.displayName).tag(SubtitleChoice.embedded($0)) }
+                                ForEach(Array(model.externalSubtitles.enumerated()), id: \.offset) { index, track in
+                                    Text(Self.subtitleName(track, index, failed: model.failedExternal.contains(index)))
+                                        .tag(SubtitleChoice.external(index))
                                 }
                             }
                         }
                     } label: {
-                        Label("线路", systemImage: "antenna.radiowaves.left.and.right")
+                        Image(systemName: "captions.bubble").font(.title3).frame(width: 36, height: 32)
                     }
-                    .labelStyle(.iconOnly)
-                    .buttonStyle(.glass)
-                    .accessibilityIdentifier("player.streams")
+                    .accessibilityIdentifier("player.tracks")
                 }
-                if let previous = model.previous {
-                    Button("上一集", systemImage: "backward.end.fill") { Task { await model.move(to: previous) } }
-                        .labelStyle(.iconOnly)
-                        .buttonStyle(.glass)
-                        .accessibilityIdentifier("player.previous")
+                Button(fill ? "适应屏幕" : "填充屏幕",
+                       systemImage: fill ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right") {
+                    withAnimation(.snappy) { fill.toggle() }
                 }
-                if let next = model.next {
-                    Button("下一集", systemImage: "forward.end.fill") { Task { await model.move(to: next) } }
-                        .labelStyle(.iconOnly)
-                        .buttonStyle(.glass)
-                        .accessibilityIdentifier("player.next")
+                .labelStyle(.iconOnly).font(.title3).frame(width: 36, height: 32)
+            }
+            .font(.caption)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var subtitleChoice: Binding<SubtitleChoice> {
+        Binding(
+            get: {
+                if let index = model.selectedExternal { return .external(index) }
+                return model.selectedSubtitle.map(SubtitleChoice.embedded) ?? .off
+            },
+            set: { choice in
+                switch choice {
+                case .off: model.selectSubtitle(nil)
+                case .embedded(let option): model.selectSubtitle(option)
+                case .external(let index): model.selectExternalSubtitle(index)
                 }
             }
-            .padding(.horizontal)
+        )
+    }
+
+    // MARK: Visibility
+
+    private func setControls(_ visible: Bool) {
+        withAnimation(.easeInOut(duration: 0.2)) { controlsVisible = visible }
+        if visible { scheduleHide() } else { hideTask?.cancel() }
+    }
+
+    /// Controls fade out after a few seconds of playback; paused playback keeps them on screen.
+    private func scheduleHide() {
+        hideTask?.cancel()
+        hideTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(3.5))
+            guard !Task.isCancelled, model.isPlaying, scrubbing == nil else { return }
+            withAnimation(.easeInOut(duration: 0.3)) { controlsVisible = false }
         }
+    }
+
+    static func time(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds > 0 else { return "0:00" }
+        let total = Int(seconds)
+        return total >= 3600 ? String(format: "%d:%02d:%02d", total / 3600, total / 60 % 60, total % 60)
+            : String(format: "%d:%02d", total / 60, total % 60)
+    }
+
+    static func rateTitle(_ rate: Float) -> String {
+        rate == 1 ? "1×" : String(format: "%g×", rate)
     }
 }
 
@@ -253,25 +560,167 @@ extension VideoPlayerView {
     static func streamName(_ stream: IosSourcePage, _ index: Int) -> String {
         stream.label?.trimmingCharacters(in: .whitespaces).nilIfEmpty ?? "线路 \(index + 1)"
     }
+
+    static func subtitleName(_ track: SubtitleTrack, _ index: Int, failed: Bool) -> String {
+        let name = SubtitleLanguage.title(track.lang) ?? "外挂字幕 \(index + 1)"
+        return failed ? "\(name)（加载失败）" : name
+    }
+}
+
+private enum SubtitleChoice: Hashable {
+    case off
+    case embedded(AVMediaSelectionOption)
+    case external(Int)
+}
+
+/// External subtitle text over the video, above the controls' bottom bar while they are shown.
+private struct SubtitleOverlay: View {
+    let text: String
+    let raised: Bool
+
+    var body: some View {
+        Text(text)
+            .font(.system(.title3, weight: .semibold))
+            .foregroundStyle(.white)
+            .multilineTextAlignment(.center)
+            .shadow(color: .black.opacity(0.9), radius: 2)
+            .padding(.horizontal, 10).padding(.vertical, 4)
+            .background(.black.opacity(0.4), in: RoundedRectangle(cornerRadius: 6))
+            .padding(.horizontal, 24)
+            .padding(.bottom, raised ? 96 : 20)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+            .allowsHitTesting(false)
+            .animation(.easeInOut(duration: 0.2), value: raised)
+            .accessibilityIdentifier("player.subtitle")
+    }
+}
+
+/// Source subtitle labels are codes ("en", "pt-BR") or names ("English", "Español (España)").
+enum SubtitleLanguage {
+    static func title(_ lang: String) -> String? {
+        let value = lang.trimmingCharacters(in: .whitespaces)
+        guard !value.isEmpty else { return nil }
+        if value.count <= 8, let code = SourceLanguage.code(of: value),
+           let name = Locale.current.localizedString(forLanguageCode: code), name.lowercased() != code {
+            return value.contains("-") || value.contains("_") ? SourceLanguage.title(value) : name
+        }
+        return value
+    }
+
+    /// The track to turn on: the viewer's last choice, then one of their languages, then the first one.
+    static func preferredIndex(_ labels: [String], last: String?) -> Int? {
+        guard !labels.isEmpty else { return nil }
+        if let last, let index = labels.firstIndex(of: last) { return index }
+        return labels.firstIndex { label in
+            let lowered = label.lowercased()
+            return SourceLanguage.preferred.contains { code in
+                if SourceLanguage.code(of: lowered) == code && lowered.count <= 8 { return true }
+                // Names in English, the language itself, or the device language.
+                return [Locale(identifier: "en"), Locale(identifier: code), Locale.current].contains { locale in
+                    locale.localizedString(forLanguageCode: code).map { lowered.hasPrefix($0.lowercased()) } ?? false
+                }
+            }
+        } ?? 0
+    }
+}
+
+/// A side-loaded subtitle of the current stream, copied out of the shared page model.
+struct SubtitleTrack: Hashable {
+    let url: String
+    let lang: String
+    let headers: [String: String]
+}
+
+extension SubtitleTrack {
+    init(_ track: IosExternalTrack) { self.init(url: track.url, lang: track.lang, headers: track.headers) }
+}
+
+/// Downloads a subtitle file with the stream's headers (sites check Referer on every request) plus the track's own.
+enum SubtitleFile {
+    static func download(_ track: SubtitleTrack, streamHeaders: [String: String]) async throws -> String {
+        guard let url = URL(string: track.url) else { throw URLError(.badURL) }
+        var request = URLRequest(url: url, timeoutInterval: 30)
+        for (name, value) in streamHeaders.merging(track.headers, uniquingKeysWith: { _, own in own }) {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            throw URLError(.badServerResponse)
+        }
+        return decode(data)
+    }
+
+    /// UTF-8 (with or without BOM), UTF-16 with BOM, then GB 18030, common for Chinese SubRip files.
+    static func decode(_ data: Data) -> String {
+        if data.starts(with: [0xFF, 0xFE]) || data.starts(with: [0xFE, 0xFF]),
+           let text = String(data: data, encoding: .utf16) { return text }
+        if let text = String(data: data, encoding: .utf8) { return text }
+        let gb18030 = String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(
+            CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)))
+        return String(data: data, encoding: gb18030) ?? String(decoding: data, as: UTF8.self)
+    }
 }
 
 private extension String {
     var nilIfEmpty: String? { isEmpty ? nil : self }
 }
 
-/// The system player controller keeps native controls, AirPlay and Picture in Picture.
-private struct SystemPlayer: UIViewControllerRepresentable {
+/// System Picture in Picture for the player layer; observable so the button appears only when PiP is possible.
+@Observable
+final class PictureInPicture: NSObject, AVPictureInPictureControllerDelegate {
+    private(set) var isPossible = false
+    private var controller: AVPictureInPictureController?
+    private var observation: NSKeyValueObservation?
+
+    func attach(_ layer: AVPlayerLayer) {
+        guard controller?.playerLayer !== layer, AVPictureInPictureController.isPictureInPictureSupported() else { return }
+        let controller = AVPictureInPictureController(playerLayer: layer)
+        controller?.canStartPictureInPictureAutomaticallyFromInline = true
+        observation = controller?.observe(\.isPictureInPicturePossible, options: [.initial, .new]) { [weak self] pip, _ in
+            let possible = pip.isPictureInPicturePossible
+            DispatchQueue.main.async { self?.isPossible = possible }
+        }
+        self.controller = controller
+    }
+
+    func start() { controller?.startPictureInPicture() }
+}
+
+/// AVPlayerLayer host: aspect fit, or fill when toggled.
+private struct PlayerLayerView: UIViewRepresentable {
     let player: AVPlayer
+    let fill: Bool
+    let pip: PictureInPicture
 
-    func makeUIViewController(context: Context) -> AVPlayerViewController {
-        let controller = AVPlayerViewController()
-        controller.player = player
-        controller.allowsPictureInPicturePlayback = true
-        controller.canStartPictureInPictureAutomaticallyFromInline = true
-        return controller
+    final class LayerView: UIView {
+        override static var layerClass: AnyClass { AVPlayerLayer.self }
+        var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
     }
 
-    func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {
-        if controller.player !== player { controller.player = player }
+    func makeUIView(context: Context) -> LayerView {
+        let view = LayerView()
+        view.backgroundColor = .black
+        view.playerLayer.player = player
+        pip.attach(view.playerLayer)
+        return view
     }
+
+    func updateUIView(_ view: LayerView, context: Context) {
+        if view.playerLayer.player !== player { view.playerLayer.player = player }
+        view.playerLayer.videoGravity = fill ? .resizeAspectFill : .resizeAspect
+        pip.attach(view.playerLayer)
+    }
+}
+
+/// The system AirPlay route button.
+private struct AirPlayButton: UIViewRepresentable {
+    func makeUIView(context: Context) -> AVRoutePickerView {
+        let view = AVRoutePickerView()
+        view.tintColor = .white
+        view.activeTintColor = .systemBlue
+        view.prioritizesVideoDevices = true
+        return view
+    }
+
+    func updateUIView(_ view: AVRoutePickerView, context: Context) {}
 }

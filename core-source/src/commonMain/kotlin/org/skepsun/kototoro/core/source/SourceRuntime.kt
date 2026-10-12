@@ -21,6 +21,12 @@ interface SourceRuntime {
     suspend fun fetchCover(content: SourceContent, large: Boolean = false): SourceCoverArtifact =
         throw SourceOperationUnsupportedException()
     suspend fun getRelated(content: SourceContent): List<SourceContent>
+    /** The site to verify in a browser and the User-Agent to verify it with (clearance is bound to it). */
+    suspend fun browserSession(sourceName: String): SourceBrowserSession =
+        describe(sourceName).homepage?.let { SourceBrowserSession(it) } ?: throw SourceOperationUnsupportedException()
+    /** Stores browser cookies for [url] in the cookie jar the source's requests use; returns how many were taken. */
+    suspend fun importCookies(sourceName: String, url: String, cookies: List<String>): Int =
+        throw SourceOperationUnsupportedException()
 }
 
 class SourceUnavailableException(val sourceName: String) : Exception("Source unavailable: $sourceName")
@@ -28,3 +34,22 @@ class SourceUnavailableException(val sourceName: String) : Exception("Source una
 class SourceInvalidArgumentException : Exception("Invalid source argument")
 
 class SourceOperationUnsupportedException : Exception("Unsupported source operation")
+
+/**
+ * A request met a browser challenge. Runtimes throw it (or hosts recognise their libraries' own exceptions, see
+ * [SourceEndpoint]); only the [origin] crosses the wire.
+ */
+class SourceChallengeException(url: String?) : Exception("Browser verification required") {
+    val origin: String? = url?.let(::originOf)
+
+    companion object {
+        /** `https://example.com` from any URL of that site; null for anything that is not http(s). */
+        fun originOf(url: String): String? {
+            val scheme = url.substringBefore("://", "").lowercase()
+            if (scheme != "http" && scheme != "https") return null
+            val host = url.substringAfter("://").substringBefore('/').substringBefore('?').substringBefore('#')
+                .substringAfterLast('@')
+            return if (host.isEmpty()) null else "$scheme://$host"
+        }
+    }
+}

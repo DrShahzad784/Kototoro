@@ -22,10 +22,7 @@ import com.googlecode.d2j.node.insn.Stmt2R1NNode
 import com.googlecode.d2j.node.insn.Stmt2RNode
 import com.googlecode.d2j.node.insn.Stmt3RNode
 import com.googlecode.d2j.node.insn.TypeStmtNode
-import com.googlecode.d2j.reader.BaseDexFileReader
-import com.googlecode.d2j.reader.DexFileReader
 import com.googlecode.d2j.reader.Op
-import com.googlecode.d2j.visitors.DexFileVisitor
 
 /**
  * R8 removes trivial constructors and inlines them at the call sites, leaving `new-instance vA, LT;` followed by
@@ -47,9 +44,8 @@ internal class DexRepairPlan private constructor(
         private val constructors = HashSet<String>()
         private val sites = ArrayList<Triple<String, String, List<String>>>()
 
-        /** Indexes one dex file: what it defines and which instantiations need repair. */
-        fun add(dex: ByteArray) {
-            val node = read(dex)
+        /** Indexes one parsed dex file (before [apply]): what it defines and which instantiations need repair. */
+        fun add(node: DexFileNode) {
             for (clz in node.clzs.orEmpty()) {
                 defined += clz.className
                 clz.superClass?.let { superOf[clz.className] = it }
@@ -140,37 +136,10 @@ internal class DexRepairPlan private constructor(
         return registers.toIntArray()
     }
 
-    /** Wraps a reader so dex2jar sees the repaired classes; [repaired] counts the call sites that changed. */
-    class Reader(private val delegate: BaseDexFileReader, private val plan: DexRepairPlan) : BaseDexFileReader {
-        var repaired = 0
-            private set
-
-        override fun getDexVersion() = delegate.dexVersion
-        override fun getClassNames(): List<String> = delegate.classNames
-        override fun accept(visitor: DexFileVisitor) = accept(visitor, 0)
-        override fun accept(visitor: DexFileVisitor, config: Int) {
-            val node = DexFileNode()
-            delegate.accept(node, config)
-            repaired += plan.apply(node)
-            node.accept(visitor)
-        }
-
-        override fun accept(visitor: DexFileVisitor, first: Int, second: Int) {
-            val node = DexFileNode()
-            delegate.accept(node, first, second)
-            repaired += plan.apply(node)
-            node.accept(visitor)
-        }
-    }
-
     private companion object {
         const val MAXIMUM_CHAIN = 32
 
         fun key(owner: String, parameters: List<String>) = owner + parameters.joinToString("", "(", ")")
-
-        fun read(dex: ByteArray): DexFileNode = DexFileNode().also {
-            DexFileReader(dex).accept(it, DexFileReader.SKIP_DEBUG or DexFileReader.IGNORE_READ_EXCEPTION)
-        }
     }
 }
 

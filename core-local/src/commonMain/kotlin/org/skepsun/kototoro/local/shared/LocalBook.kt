@@ -1,0 +1,269 @@
+package org.skepsun.kototoro.local.shared
+
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.floatOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import okio.FileSystem
+import okio.Path
+import okio.Path.Companion.toPath
+import okio.openZip
+
+/** One imported work as read from its file: metadata plus where each chapter's pages or text are. */
+data class LocalBook(
+    val title: String,
+    val authors: List<String>,
+    val description: String?,
+    val tags: List<String>,
+    /** Archive entry of the cover picture, when there is one. */
+    val cover: String?,
+    val chapters: List<LocalChapter>,
+)
+
+data class LocalChapter(
+    val title: String,
+    val number: Float,
+    /** Image entries in reading order (archives). */
+    val pages: List<String> = emptyList(),
+    /** The chapter's XHTML entry (EPUB). */
+    val document: String? = null,
+    /** Character range of the chapter in the decoded text (TXT). */
+    val textStart: Int = 0,
+    val textEnd: Int = 0,
+    val branch: String? = null,
+)
+
+/** Reads CBZ/ZIP, EPUB and TXT files with okio; [decodeLegacyText] handles TXT files that are not UTF-8. */
+class LocalBookReader(
+    private val fileSystem: FileSystem = FileSystem.SYSTEM,
+    private val decodeLegacyText: (ByteArray) -> String? = { null },
+) {
+    private val json = Json { ignoreUnknownKeys = true; isLenient = true }
+
+    fun read(file: Path, format: LocalFormat, fallbackTitle: String): LocalBook = when (format) {
+        LocalFormat.ARCHIVE -> readArchive(file, fallbackTitle)
+        LocalFormat.EPUB -> readEpub(file, fallbackTitle)
+        LocalFormat.TXT -> readText(file, fallbackTitle)
+    }
+
+    /** Bytes of one entry inside an archive or EPUB. */
+    fun entry(file: Path, entry: String): ByteArray {
+        val zip = fileSystem.openZip(file)
+        return zip.read(("/" + entry).toPath()) { readByteArray() }
+    }
+
+    /** The whole TXT as text, UTF-8 first (with or without BOM), the platform's legacy decoder otherwise. */
+    fun text(file: Path): String {
+        val bytes = fileSystem.read(file) { readByteArray() }
+        val utf8 = try { bytes.decodeToString(throwOnInvalidSequence = true) } catch (_: CharacterCodingException) { null }
+        val text = utf8 ?: decodeLegacyText(bytes) ?: bytes.decodeToString()
+        return text.removePrefix("\uFEFF").replace("\r\n", "\n").replace('\r', '\n')
+    }
+
+    // MARK: archives
+
+    private fun readArchive(file: Path, fallbackTitle: String): LocalBook {
+        val zip = fileSystem.openZip(file)
+        val files = zip.listRecursively("/".toPath())
+            .filter { zip.metadata(it).isRegularFile }
+            .map { it.toString().removePrefix("/") }
+            .filterNot(LocalFiles::isJunk)
+            .toList()
+        val images = files.filter(LocalFiles::isImage).sortedWith(NaturalOrder)
+        val index = files.firstOrNull { it == INDEX }?.let { name ->
+            runCatching { json.parseToJsonElement(zip.read(("/$name").toPath()) { readUtf8() }).jsonObject }.getOrNull()
+        }
+        val indexed = index?.let { indexedChapters(it, images) }.orEmpty()
+        val chapters = indexed.ifEmpty { folderChapters(images, index?.string("title") ?: fallbackTitle) }
+        require(chapters.isNotEmpty()) { "压缩包里没有图片" }
+        val coverEntry = index?.string("cover_entry")?.takeIf { it in files }
+        return LocalBook(
+            title = index?.string("title") ?: fallbackTitle,
+            authors = index?.let { it.strings("authors").ifEmpty { listOfNotNull(it.string("author")) } }.orEmpty(),
+            description = index?.string("description"),
+            tags = (index?.get("tags") as? JsonArray).orEmpty().mapNotNull {
+                (it as? JsonObject)?.string("title")
+            },
+            cover = coverEntry ?: chapters.first().pages.first(),
+            chapters = chapters,
+        )
+    }
+
+    /**
+     * Archives Kototoro writes: index.json lists the chapters, and each chapter's pages are the entries whose names
+     * (without extension) match its `entries` pattern (`%08d_%04d\d{4}` from branch hash and order).
+     */
+    private fun indexedChapters(index: JsonObject, images: List<String>): List<LocalChapter> {
+        val chapters = index["chapters"] as? JsonObject ?: return emptyList()
+        return chapters.entries.mapNotNull { (_, value) ->
+            val chapter = value as? JsonObject ?: return@mapNotNull null
+            val order = chapter.int("order") ?: 1
+            val branch = chapter.string("branch")
+            val pattern = chapter.string("entries")
+                ?: "${javaPad(branch?.hashCode() ?: 0, 8)}_${javaPad(order, 4)}\\d{4}"
+            val regex = runCatching { Regex(pattern) }.getOrNull() ?: return@mapNotNull null
+            val folder = chapter.string("file")?.trim('/')
+            val pages = images.filter { entry ->
+                if (folder != null && folder.isNotEmpty()) entry.startsWith("$folder/")
+                else LocalFiles.baseName(entry).matches(regex)
+            }
+            if (pages.isEmpty()) return@mapNotNull null
+            order to LocalChapter(
+                title = chapter.string("name")?.takeIf(String::isNotBlank) ?: "第 $order 章",
+                number = chapter.float("number") ?: order.toFloat(),
+                pages = pages,
+                branch = branch,
+            )
+        }.sortedBy { it.first }.map { it.second }
+    }
+
+    /** Plain archives: every folder of pictures is a chapter, pictures at the top level form one chapter. */
+    private fun folderChapters(images: List<String>, title: String): List<LocalChapter> {
+        val groups = images.groupBy { it.substringBeforeLast('/', "") }
+        if (groups.size <= 1) {
+            return listOfNotNull(images.takeIf { it.isNotEmpty() }?.let { LocalChapter(title, 1f, pages = it) })
+        }
+        return groups.keys.sortedWith(NaturalOrder).mapIndexed { index, folder ->
+            LocalChapter(
+                title = if (folder.isEmpty()) title else folder.substringAfterLast('/'),
+                number = (index + 1).toFloat(),
+                pages = groups.getValue(folder),
+            )
+        }
+    }
+
+    // MARK: EPUB
+
+    private fun readEpub(file: Path, fallbackTitle: String): LocalBook {
+        val zip = fileSystem.openZip(file)
+        fun read(entry: String): String? = runCatching { zip.read(("/$entry").toPath()) { readUtf8() } }.getOrNull()
+        val container = read("META-INF/container.xml") ?: throw IllegalArgumentException("EPUB 缺少 container.xml")
+        val opfPath = LocalXml.tags(container, "rootfile").firstNotNullOfOrNull { it["full-path"] }
+            ?: throw IllegalArgumentException("EPUB 没有内容清单")
+        val opf = read(opfPath) ?: throw IllegalArgumentException("EPUB 内容清单无法读取")
+        val manifest = LocalXml.tags(opf, "item").mapNotNull { item ->
+            val id = item["id"] ?: return@mapNotNull null
+            val href = item["href"] ?: return@mapNotNull null
+            id to EpubItem(resolveHref(opfPath, href), item["media-type"].orEmpty(), item["properties"].orEmpty())
+        }.toMap()
+        val spine = LocalXml.tags(opf, "itemref").mapNotNull { manifest[it["idref"]] }
+            .filter { it.mediaType.contains("html") || it.href.endsWith("html", ignoreCase = true) }
+        require(spine.isNotEmpty()) { "EPUB 没有正文" }
+        val toc = tableOfContents(manifest.values, opf, ::read)
+        val chapters = spine.mapIndexed { index, item ->
+            LocalChapter(
+                title = toc[item.href] ?: "第 ${index + 1} 节",
+                number = (index + 1).toFloat(),
+                document = item.href,
+            )
+        }
+        val coverId = LocalXml.tags(opf, "meta").firstOrNull { it["name"] == "cover" }?.get("content")
+        val cover = manifest.values.firstOrNull { "cover-image" in it.properties }?.href
+            ?: coverId?.let { manifest[it]?.href }?.takeIf(LocalFiles::isImage)
+            ?: manifest.values.firstOrNull { LocalFiles.isImage(it.href) && "cover" in it.href.lowercase() }?.href
+        return LocalBook(
+            title = LocalXml.texts(opf, "title").firstOrNull() ?: fallbackTitle,
+            authors = LocalXml.texts(opf, "creator").distinct(),
+            description = LocalXml.texts(opf, "description").firstOrNull(),
+            tags = LocalXml.texts(opf, "subject").distinct(),
+            cover = cover,
+            chapters = chapters,
+        )
+    }
+
+    /** Chapter titles by document: EPUB 3 navigation document first, the EPUB 2 NCX otherwise. */
+    private fun tableOfContents(items: Collection<EpubItem>, opf: String, read: (String) -> String?): Map<String, String> {
+        val titles = linkedMapOf<String, String>()
+        items.firstOrNull { "nav" in it.properties.split(' ') }?.let { nav ->
+            val xml = read(nav.href) ?: return@let
+            Regex("<a\\s[^>]*href\\s*=\\s*[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+                .findAll(xml).forEach { match ->
+                    val title = LocalXml.text(match.groupValues[2])
+                    if (title.isNotEmpty()) titles.getOrPut(resolveHref(nav.href, match.groupValues[1])) { title }
+                }
+        }
+        if (titles.isNotEmpty()) return titles
+        val ncx = items.firstOrNull { it.mediaType == "application/x-dtbncx+xml" || it.href.endsWith(".ncx", true) }
+            ?: return titles
+        val xml = read(ncx.href) ?: return titles
+        Regex("<navLabel[^>]*>\\s*<text[^>]*>(.*?)</text>.*?<content\\s[^>]*src\\s*=\\s*[\"']([^\"']+)[\"']",
+            setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)).findAll(xml).forEach { match ->
+            val title = LocalXml.text(match.groupValues[1])
+            if (title.isNotEmpty()) titles.getOrPut(resolveHref(ncx.href, match.groupValues[2])) { title }
+        }
+        return titles
+    }
+
+    private class EpubItem(val href: String, val mediaType: String, val properties: String)
+
+    // MARK: TXT
+
+    private fun readText(file: Path, fallbackTitle: String): LocalBook {
+        val text = text(file)
+        require(text.isNotBlank()) { "文本文件是空的" }
+        return LocalBook(fallbackTitle, emptyList(), null, emptyList(), null, splitText(text))
+    }
+
+    companion object {
+        const val INDEX = "index.json"
+        private const val PART_LENGTH = 8000
+        private val heading = Regex(
+            "^[ \\t\\u3000]*(第[ \\t\\u3000]*[0-9０-９零〇一二三四五六七八九十百千万两]+[ \\t\\u3000]*[章回节卷集部篇话]" +
+                "|(?:Chapter|CHAPTER)[ \\t]+[0-9IVXLC]+|序章|序言|楔子|引子|前言|尾声|后记|番外)[^\\n]{0,40}$",
+            RegexOption.MULTILINE,
+        )
+
+        /** Chapters at "第N章"-style headings; text without headings is cut into parts at line ends. */
+        fun splitText(text: String): List<LocalChapter> {
+            val headings = heading.findAll(text).toList()
+            if (headings.size >= 2) {
+                val chapters = mutableListOf<LocalChapter>()
+                val preface = text.substring(0, headings.first().range.first)
+                if (preface.isNotBlank() && preface.trim().length > 20) {
+                    chapters += LocalChapter("前言", 0f, textStart = 0, textEnd = headings.first().range.first)
+                }
+                headings.forEachIndexed { index, match ->
+                    val end = headings.getOrNull(index + 1)?.range?.first ?: text.length
+                    chapters += LocalChapter(match.value.trim(), (index + 1).toFloat(),
+                        textStart = match.range.last + 1, textEnd = end)
+                }
+                return chapters
+            }
+            val chapters = mutableListOf<LocalChapter>()
+            var start = 0
+            while (start < text.length) {
+                var end = minOf(text.length, start + PART_LENGTH)
+                if (end < text.length) {
+                    val lineEnd = text.indexOf('\n', end)
+                    end = if (lineEnd == -1 || lineEnd - end > PART_LENGTH / 2) end else lineEnd + 1
+                }
+                chapters += LocalChapter("第 ${chapters.size + 1} 部分", (chapters.size + 1).toFloat(),
+                    textStart = start, textEnd = end)
+                start = end
+            }
+            return chapters
+        }
+
+        /** Java's `%0Nd`: zero padding after the sign, as Android formats the entry pattern. */
+        private fun javaPad(value: Int, width: Int): String {
+            val digits = if (value < 0) (-value.toLong()).toString() else value.toString()
+            val sign = if (value < 0) "-" else ""
+            return sign + digits.padStart(width - sign.length, '0')
+        }
+
+        private fun JsonObject.string(key: String): String? =
+            (get(key) as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() && it != "null" }
+
+        private fun JsonObject.strings(key: String): List<String> =
+            (get(key) as? JsonArray).orEmpty().mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank) }
+
+        private fun JsonObject.int(key: String): Int? = (get(key) as? JsonPrimitive)?.intOrNull
+
+        private fun JsonObject.float(key: String): Float? = (get(key) as? JsonPrimitive)?.floatOrNull
+    }
+}

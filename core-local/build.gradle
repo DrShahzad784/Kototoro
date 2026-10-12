@@ -1,0 +1,40 @@
+// Local works (docs/architecture/ios-data-portability-plan-2026-10.md §1): CBZ/ZIP manga (including the archives
+// Kototoro writes with index.json), EPUB and TXT novels, read with okio's ZIP file system and served as a shared
+// SourceRuntime ("LOCAL" / "LOCAL_NOVEL", Android's local source names). Pure Kotlin; the platform passes the storage
+// directories and the legacy text decoder (GB18030 and other non-UTF-8 TXT files).
+plugins {
+	id 'org.jetbrains.kotlin.multiplatform'
+	id 'org.jetbrains.kotlin.plugin.serialization'
+}
+
+kotlin {
+	jvm {
+		compilerOptions {
+			jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11
+		}
+	}
+	iosArm64()
+	iosSimulatorArm64()
+
+	sourceSets {
+		getByName('commonMain') {
+			dependencies {
+				api project(':core-source')
+				api libs.okio
+				implementation "org.jetbrains.kotlinx:kotlinx-serialization-json:${libs.versions.serialization.get()}"
+				implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:${libs.versions.coroutines.get()}"
+			}
+		}
+		getByName('jvmTest') {
+			dependencies {
+				implementation 'org.junit.jupiter:junit-jupiter:5.8.2'
+				runtimeOnly 'org.junit.platform:junit-platform-launcher:1.8.2'
+				implementation libs.kotlinx.coroutines.test
+			}
+		}
+	}
+}
+
+tasks.withType(Test).configureEach {
+	useJUnitPlatform()
+}

@@ -57,7 +57,13 @@ final class NovelReaderModel: ObservableObject {
     @Published private(set) var blocks: [NovelBlock] = []
     @Published private(set) var bookmarks: [IosBookmark] = []
     private(set) var text: IosChapterText?
+    /// Downloaded pictures of the current chapter, by their original URL.
+    private(set) var localImages: [String: URL] = [:]
+    /// The chapter on screen was read from its download.
+    @Published private(set) var isOffline = false
     @Published private(set) var error: String?
+    /// The last failure was a browser challenge (Cloudflare): the error offers the in-app browser.
+    @Published private(set) var challenge: IosChallenge?
     @Published private(set) var isLoading = false
     let runtime: IosSources
     let content: IosSourceContent
@@ -84,14 +90,18 @@ final class NovelReaderModel: ObservableObject {
         let selected = chapter
         isLoading = true
         visibleIndices = []
-        error = nil
+        error = nil; challenge = nil
         defer { if self.request == request { isLoading = false } }
         do {
-            let text = try await runtime.chapterText(chapter: selected)
+            // A downloaded chapter reads offline; a damaged download falls back to the source.
+            let offline = try? NovelDownloads.offline(content: content, chapter: selected)
+            let text = if let offline { offline.0 } else { try await runtime.chapterText(chapter: selected) }
             try Task.checkCancellation()
             guard self.request == request else { return }
             // Parsing large chapters off the main actor keeps scrolling responsive.
             self.text = text
+            localImages = offline?.1 ?? [:]
+            isOffline = offline != nil
             let html = text?.html ?? ""
             blocks = await Task.detached(priority: .userInitiated) { NovelText.blocks(from: html) }.value
             guard self.request == request else { return }
@@ -102,7 +112,10 @@ final class NovelReaderModel: ObservableObject {
             await persist()
             await refreshBookmarks()
         } catch {
-            if !Task.isCancelled, self.request == request { self.error = error.localizedDescription }
+            if !Task.isCancelled, self.request == request {
+                self.error = SourceErrorText.describe(error)
+                challenge = SourceErrorText.challenge(error)
+            }
         }
     }
 
@@ -163,11 +176,14 @@ final class NovelReaderModel: ObservableObject {
 
 struct NovelReaderView: View {
     @EnvironmentObject private var library: LibraryModel
+    @EnvironmentObject private var downloads: ReaderDownloadQueue
     @StateObject private var model: NovelReaderModel
     @AppStorage("novel.fontSize") private var fontSize = 18.0
     @AppStorage("novel.lineSpacing") private var lineSpacing = 8.0
     @State private var showingSheet = false
     @State private var sheetTab = 0
+    @State private var showingDownloads = false
+    @State private var downloadError: String?
 
     init(runtime: IosSources, content: IosSourceContent, chapter: IosSourceChapter) {
         _model = StateObject(wrappedValue: NovelReaderModel(runtime: runtime, content: content, chapter: chapter))
@@ -179,12 +195,22 @@ struct NovelReaderView: View {
                 LazyVStack(alignment: .leading, spacing: lineSpacing * 1.5) {
                     Text(model.chapter.title)
                         .font(.title2.weight(.semibold))
-                        .padding(.bottom, 8)
+                        .padding(.bottom, model.isOffline ? 0 : 8)
                         .id("top")
+                    if model.isOffline {
+                        Label("已下载 · 离线阅读", systemImage: "arrow.down.circle.fill")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .padding(.bottom, 8)
+                            .accessibilityIdentifier("novel.offline")
+                    }
                     if model.isLoading { ProgressView().frame(maxWidth: .infinity).padding(.top, 40) }
                     if let error = model.error {
                         Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.red)
                             .accessibilityIdentifier("novel.error")
+                        if let challenge = model.challenge {
+                            ChallengeVerifyButton(challenge: challenge, runtime: model.runtime,
+                                                  sourceName: model.content.sourceName) { await model.load() }
+                        }
                         Button("重试") { Task { await model.load() } }.buttonStyle(.glass)
                     }
                     if !model.isLoading && model.error == nil && model.blocks.isEmpty {
@@ -200,7 +226,8 @@ struct NovelReaderView: View {
                                 .textSelection(.enabled)
                                 .accessibilityIdentifier(index == 0 ? "novel.firstParagraph" : "novel.paragraph")
                         case .image(let url):
-                            HeaderImage(url: url, headers: model.text?.headers(imageUrl: url.absoluteString) ?? [:])
+                            HeaderImage(url: model.localImages[url.absoluteString] ?? url,
+                                        headers: model.text?.headers(imageUrl: url.absoluteString) ?? [:])
                                 .frame(maxWidth: .infinity)
                         }
                         }
@@ -227,6 +254,8 @@ struct NovelReaderView: View {
                     .accessibilityIdentifier("novel.bookmark")
                     Button("目录与书签", systemImage: "list.bullet") { showingSheet = true }
                         .accessibilityIdentifier("novel.chapters")
+                    // Imported files are already on the device.
+                    if !model.runtime.isLocal(content: model.content) { downloadMenu }
                     Menu("排版", systemImage: "textformat.size") {
                         Stepper("字号 \(Int(fontSize))", value: $fontSize, in: 13...32, step: 1)
                         Stepper("行距 \(Int(lineSpacing))", value: $lineSpacing, in: 2...20, step: 2)
@@ -235,13 +264,62 @@ struct NovelReaderView: View {
                 }
             }
             .sheet(isPresented: $showingSheet) { navigationSheet(proxy) }
+            .alert("无法下载", isPresented: Binding(get: { downloadError != nil }, set: { if !$0 { downloadError = nil } })) {
+                Button("好") { downloadError = nil }
+            } message: { Text(downloadError ?? "") }
             .task {
                 model.library = library.library
                 await model.load()
                 proxy.scrollTo(model.resumeIndex, anchor: .top)
             }
             .onDisappear { Task { await model.persist(); await library.refresh() } }
+            .readerPresence()
         }
+    }
+
+    /// Android's novel download choices: this chapter, the next ones, or every chapter not yet saved.
+    private var downloadMenu: some View {
+        Menu {
+            Section(downloadStatus ?? "") {
+                Button("下载本章", systemImage: "arrow.down.circle") { enqueue([model.chapter]) }
+                    .disabled(ReaderDownloads.isDownloaded(content: model.content, chapter: model.chapter))
+                    .accessibilityIdentifier("novel.download.current")
+                Button("下载后续 10 章", systemImage: "arrow.down.to.line") { enqueue(followingChapters(10)) }
+                    .disabled(followingChapters(10).isEmpty)
+                    .accessibilityIdentifier("novel.download.next")
+                Button("下载全部未下载章节", systemImage: "square.and.arrow.down.on.square") {
+                    enqueue(model.content.chapters.filter { !ReaderDownloads.isDownloaded(content: model.content, chapter: $0) })
+                }
+                .accessibilityIdentifier("novel.download.all")
+            }
+            Button("下载队列", systemImage: "list.bullet.rectangle") { showingDownloads = true }
+                .accessibilityIdentifier("novel.downloads")
+        } label: {
+            Label("下载", systemImage: "arrow.down.circle")
+        }
+        .accessibilityIdentifier("novel.download")
+        .sheet(isPresented: $showingDownloads) { ReaderDownloadsSheet() }
+    }
+
+    private var downloadStatus: String? {
+        if ReaderDownloads.isDownloaded(content: model.content, chapter: model.chapter) { return "本章已下载，可离线阅读" }
+        return downloads.entry(content: model.content, chapter: model.chapter)?.status
+    }
+
+    private func followingChapters(_ count: Int) -> [IosSourceChapter] {
+        var result: [IosSourceChapter] = []
+        var current = model.chapter
+        while result.count < count, let next = model.content.adjacentChapter(chapter: current, forward: true) {
+            if !ReaderDownloads.isDownloaded(content: model.content, chapter: next) { result.append(next) }
+            current = next
+        }
+        return result
+    }
+
+    private func enqueue(_ chapters: [IosSourceChapter]) {
+        guard !chapters.isEmpty else { return }
+        do { try downloads.enqueue(content: model.content, chapters: chapters) }
+        catch { downloadError = error.localizedDescription }
     }
 
     private func navigationSheet(_ proxy: ScrollViewProxy) -> some View {
@@ -262,10 +340,20 @@ struct NovelReaderView: View {
                             HStack {
                                 Text(item.title)
                                 Spacer()
+                                if ReaderDownloads.isDownloaded(content: model.content, chapter: item) {
+                                    Image(systemName: "arrow.down.circle.fill").foregroundStyle(.secondary)
+                                        .accessibilityLabel("已下载")
+                                }
                                 if item.id == model.chapter.id { Image(systemName: "book.fill") }
                             }
                         }
                         .accessibilityIdentifier("novel.chapter.\(item.id)")
+                        .swipeActions {
+                            if !model.runtime.isLocal(content: model.content),
+                               !ReaderDownloads.isDownloaded(content: model.content, chapter: item) {
+                                Button("下载", systemImage: "arrow.down.circle") { enqueue([item]) }.tint(.accentColor)
+                            }
+                        }
                     }
                 } else if model.bookmarks.isEmpty {
                     ContentUnavailableView("暂无书签", systemImage: "bookmark")

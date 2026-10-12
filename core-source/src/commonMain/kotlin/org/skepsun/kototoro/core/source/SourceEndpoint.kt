@@ -16,7 +16,11 @@ fun interface SourceTransport {
 class SourceEndpoint(
     private val runtime: SourceRuntime,
     private val reportFailure: (SourceRequest, Exception) -> Unit,
+    /** Recognises a host library's own challenge exceptions anywhere in a failure's cause chain. */
+    private val challengeOf: (Throwable) -> SourceChallengeException?,
 ) : SourceTransport {
+    constructor(runtime: SourceRuntime, reportFailure: (SourceRequest, Exception) -> Unit) :
+        this(runtime, reportFailure, { null })
     constructor(runtime: SourceRuntime) : this(runtime, { _, _ -> })
     override suspend fun exchange(request: String): String {
         currentCoroutineContext().ensureActive()
@@ -60,6 +64,10 @@ class SourceEndpoint(
                 is SourceCall.Image -> SourceResult.Image(runtime.fetchImage(call.page))
                 is SourceCall.Cover -> SourceResult.Cover(runtime.fetchCover(call.content, call.large))
                 is SourceCall.Related -> SourceResult.Related(runtime.getRelated(call.content))
+                is SourceCall.BrowserSession -> SourceResult.BrowserSession(runtime.browserSession(call.sourceName))
+                is SourceCall.ImportCookies -> SourceResult.CookiesImported(
+                    runtime.importCookies(call.sourceName, call.url, call.cookies),
+                )
             }
             currentCoroutineContext().ensureActive()
             SourceProtocolJson.encodeToString(SourceResponse(requestId = decoded.requestId, result = result))
@@ -72,12 +80,30 @@ class SourceEndpoint(
         } catch (_: SourceOperationUnsupportedException) {
             failure(decoded.requestId, SourceErrorCode.UNSUPPORTED_OPERATION, "Unsupported source operation")
         } catch (error: Exception) {
-            // Do not expose parser stack traces, tokens or raw request URLs through the wire protocol.
-            runCatching { reportFailure(decoded, error) }
-            failure(decoded.requestId, SourceErrorCode.RUNTIME_FAILURE, "Source operation failed")
+            val challenge = challenge(error)
+            if (challenge != null) {
+                // Only the site's origin is sent, never the request URL or its query.
+                SourceProtocolJson.encodeToString(SourceResponse(requestId = decoded.requestId, error = SourceError(
+                    SourceErrorCode.CHALLENGE_REQUIRED, "Browser verification required", challenge.origin,
+                )))
+            } else {
+                // Do not expose parser stack traces, tokens or raw request URLs through the wire protocol.
+                runCatching { reportFailure(decoded, error) }
+                failure(decoded.requestId, SourceErrorCode.RUNTIME_FAILURE, "Source operation failed")
+            }
         }
         currentCoroutineContext().ensureActive()
         return response
+    }
+
+    private fun challenge(error: Throwable): SourceChallengeException? {
+        var current: Throwable? = error
+        var depth = 0
+        while (current != null && depth++ < 16) {
+            (current as? SourceChallengeException ?: runCatching { challengeOf(current) }.getOrNull())?.let { return it }
+            current = current.cause?.takeIf { it !== current }
+        }
+        return null
     }
 
     private fun failure(requestId: String?, code: SourceErrorCode, message: String): String =

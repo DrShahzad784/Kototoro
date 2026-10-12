@@ -13,6 +13,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 class IosVideoSourcesTest {
     private val api = "https://cms.example/api.php/provide/vod/"
@@ -32,6 +33,40 @@ class IosVideoSourcesTest {
             block("$directory/library.db")
         } finally {
             files.removeItemAtPath(directory, null)
+        }
+    }
+
+    @Test
+    fun siteSettingsMoveTheApiAndSetTheUserAgent() = withLibrary { path ->
+        val moved = "https://mirror.example/api.php/provide/vod/"
+        val requests = mutableListOf<Pair<String, Map<String, String>>>()
+        val recording = TvBoxHttp { url, headers ->
+            requests += url to headers
+            if (url.startsWith(api) || url.startsWith(moved)) list else throw IllegalStateException("HTTP 404")
+        }
+        val library = IosLibrary(path)
+        try {
+            val store = IosVideoSources(library, recording)
+            store.importFrom("$api?ac=list", "示例站")
+            val id = store.list().single().id
+            val initial = store.settings(id)
+            assertTrue(initial.api.startsWith(api), initial.api)
+            assertEquals("", initial.userAgent)
+            assertFailsWith<IllegalArgumentException> { store.updateSettings(id, "ftp://x", "") }
+            store.updateSettings(id, moved, "KototoroTest/1.0")
+            assertEquals(IosVideoSiteSettings(moved, "KototoroTest/1.0"), store.settings(id))
+            val sources = IosSources(null, store)
+            requests.clear()
+            sources.reloadVideoSites()
+            sources.page(id, 0, 0, null, null)
+            val (url, headers) = requests.first()
+            assertTrue(url.startsWith(moved), url)
+            assertEquals("KototoroTest/1.0", headers["User-Agent"])
+            // A blank User-Agent removes the override again.
+            store.updateSettings(id, moved, " ")
+            assertEquals(IosVideoSiteSettings(moved, ""), store.settings(id))
+        } finally {
+            library.close()
         }
     }
 

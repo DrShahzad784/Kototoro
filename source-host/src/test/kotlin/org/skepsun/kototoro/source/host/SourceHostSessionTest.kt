@@ -1,5 +1,7 @@
 package org.skepsun.kototoro.source.host
 
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.*
@@ -32,7 +34,14 @@ class SourceHostSessionTest {
             val result = SourceProtocolJson.decodeFromString<HostManagementResult>(session.exchange(request("install")))
             assertEquals(identity.packageName, result.installed.single().packageName)
             assertFalse(result.installed.single().bundled)
+            val metadata = MihonJarInspector().inspect(source)
+            assertEquals(metadata.displayName, result.installed.single().displayName)
+            assertEquals(metadata.versionName, result.installed.single().versionName)
+            assertEquals(metadata.isNsfw, result.installed.single().isAdult)
+            assertEquals(listOf("zh"), result.installed.single().languages)
+            assertEquals(result.sourceTitles.values.toList(), result.installed.single().sourceNames)
             assertTrue(result.sourceTitles.getValue("MIHON_9007199254740993").isNotBlank())
+            assertEquals(listOf("MIHON_9007199254740993"), result.installed.single().sourceIds)
             val persisted = java.nio.file.Files.readString(directory.resolve("installed.json"))
             assertThrows(SourceJarException::class.java) { runBlocking { session.exchange(request("install", 999)) } }
             assertEquals(persisted, java.nio.file.Files.readString(directory.resolve("installed.json")))
@@ -44,6 +53,9 @@ class SourceHostSessionTest {
         val reopened = open()
         try {
             val client = SourceProtocolClient(SourceTransport { reopened.exchange(it) }) { "reopened" }
+            val restored = SourceProtocolJson.decodeFromString<HostManagementResult>(reopened.exchange(request("list")))
+            assertEquals(MihonJarInspector().inspect(source).displayName, restored.installed.single().displayName)
+            assertTrue(restored.installed.single().sourceNames.isNotEmpty())
             assertEquals("MIHON_9007199254740993", client.getSources().single().name)
             reopened.exchange(request("uninstall"))
             assertTrue(client.getSources().isEmpty())
@@ -122,7 +134,8 @@ class SourceHostSessionTest {
                     override suspend fun getPageUrl(page: SourcePage) = page.url
                     override suspend fun getRelated(content: SourceContent) = emptyList<SourceContent>()
                 }
-                return SourceHostRuntimes(listOf(RoutedSourceRuntime.Route({ it == pluginSource.name }, runtime))) {
+                return SourceHostRuntimes(listOf(RoutedSourceRuntime.Route({ it == pluginSource.name }, runtime)),
+                    { mapOf(pluginSource.name to "插件站点") }) {
                     events += "plugins"
                 }
             }
@@ -143,6 +156,10 @@ class SourceHostSessionTest {
             assertTrue(client.getList("ANIYOMI_777", 0, null, null).isNotEmpty())
             assertEquals("plugin item", client.getList("PLUGIN_SITE", 0, null, null).single().title)
             assertEquals(directory.resolve("plugins/site.jar").toString(), receivedPlugins.single().path)
+            // Plugin titles reach the management reply that iOS uses for readable source names.
+            val titles = kotlinx.serialization.json.Json.parseToJsonElement(
+                session.exchange("""{"managementVersion":1,"operation":"list"}""")).jsonObject["sourceTitles"]!!.jsonObject
+            assertEquals("插件站点", titles["PLUGIN_SITE"]!!.jsonPrimitive.content)
         } finally {
             session.close()
         }
@@ -197,6 +214,56 @@ class SourceHostSessionTest {
         closer.join(10_000)
         assertFalse(closer.isAlive)
         assertTrue(pluginsClosed)
+    }
+
+    @Test
+    fun `plugin installs update live runtimes in place and prune stale artifacts`() = runBlocking {
+        val fixture = RuntimeJarFixture(directory)
+        val loader = fixture.jars.compatibilityLoader()
+        val extensions = java.nio.file.Files.createDirectories(directory.resolve("extensions"))
+        // Left by a process stopped mid-conversion.
+        val interrupted = java.nio.file.Files.createFile(extensions.resolve(".convert-1.tmp"))
+        val staging = java.nio.file.Files.createFile(extensions.resolve("conversion-2.jar"))
+        var opens = 0
+        val updates = mutableListOf<List<String>>()
+        val platform = object : SourceHostRuntimePlatform {
+            override fun initialize(): ClassLoader = loader
+            override fun close() = loader.close()
+            override fun openRuntimes(plugins: List<SourceHostPlugin>, images: SourceImageStore?,
+                preferences: SourcePreferenceStore?): SourceHostRuntimes {
+                opens++
+                return SourceHostRuntimes(emptyList(),
+                    sources = { mapOf("fixture.plugin" to listOf(SourceRef("PLUGIN_JA", "ja", "MANGA"), SourceRef("PLUGIN_ALL", "", "MANGA"))) },
+                    update = { next, publish -> publish(); updates += next.map { it.sha256.orEmpty() }; true }) {}
+            }
+        }
+        val session = SourceHostSession.open(SourceHostConfig("fixture"), directory, platform)
+        try {
+            assertFalse(java.nio.file.Files.exists(interrupted))
+            assertFalse(java.nio.file.Files.exists(staging))
+            val incoming = java.nio.file.Files.createDirectories(directory.resolve("incoming"))
+            suspend fun install(content: String): String {
+                val archive = incoming.resolve("plugin.jar")
+                java.util.zip.ZipOutputStream(java.nio.file.Files.newOutputStream(archive)).use { zip ->
+                    zip.putNextEntry(java.util.zip.ZipEntry("plugin.txt")); zip.write(content.toByteArray()); zip.closeEntry()
+                }
+                val sha = SourceHostManagement.hash(archive)
+                session.exchange(SourceProtocolJson.encodeToString(
+                    HostManagementRequest(1, "install", archive.toString(), sha, "fixture.plugin", 1, "JAR")))
+                return sha
+            }
+            val first = install("one")
+            val second = install("two")
+            val listed = SourceProtocolJson.decodeFromString<HostManagementResult>(session.exchange(SourceProtocolJson.encodeToString(
+                HostManagementRequest(1, "list", "", "", "", 0, "")))).installed.single { it.ecosystem == "JAR" }
+            assertEquals(listOf("PLUGIN_JA", "PLUGIN_ALL"), listed.sourceIds)
+            assertEquals(listOf("ja", ""), listed.languages)
+            // The plugin set changed twice without reopening every runtime.
+            assertEquals(1, opens)
+            assertEquals(listOf(listOf(first), listOf(second)), updates)
+            // Only the artifact the install record references stays on disk.
+            assertEquals(listOf("$second.jar"), java.nio.file.Files.list(extensions).use { it.map { f -> f.fileName.toString() }.toList() })
+        } finally { session.close() }
     }
 
     @Test

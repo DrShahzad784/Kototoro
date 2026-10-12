@@ -1,6 +1,8 @@
 import Combine
 import KototoroShared
 import SwiftUI
+import ImageIO
+import UniformTypeIdentifiers
 
 /// One source's listing: paged poster grid, categories and search. Paging follows the source's own mode.
 @MainActor
@@ -11,6 +13,12 @@ final class SourceBrowseModel: ObservableObject {
     @Published private(set) var isLoading = false
     @Published private(set) var hasMore = true
     @Published private(set) var error: String?
+    /// The last failure was a browser challenge (Cloudflare): offer the in-app browser instead of a bare retry.
+    @Published private(set) var challenge: IosChallenge?
+    @Published private(set) var panel: IosFilterPanel?
+    /// Why the filter panel could not be described; the chip stays and its sheet offers a retry.
+    @Published private(set) var panelError: String?
+    @Published private(set) var filter = BrowseFilter()
     @Published var query = ""
     let runtime: IosSources
     let source: IosSource
@@ -18,9 +26,14 @@ final class SourceBrowseModel: ObservableObject {
     private var activeQuery: String?
     private var generation = UUID()
 
-    init(runtime: IosSources, source: IosSource) {
+    init(runtime: IosSources, source: IosSource, initialQuery: String? = nil) {
         self.runtime = runtime
         self.source = source
+        // Opened from global search ("更多"): start with that query applied.
+        if let text = initialQuery?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+            query = text
+            activeQuery = text
+        }
     }
 
     func start() async {
@@ -32,7 +45,38 @@ final class SourceBrowseModel: ObservableObject {
 
     func select(_ category: IosSourceTag?) async {
         guard category?.key != selectedCategory?.key else { return }
+        if let panel, panel.isDynamic {
+            // Extension sources: the bar edits the same native checkbox/tri-state as the filter sheet.
+            if let previous = selectedCategory, let control = panel.control(tagKey: previous.key) {
+                filter.dynamic[control.id] = nil
+            }
+            if let category, let control = panel.control(tagKey: category.key) {
+                filter.dynamic[control.id] = control.kind == "tristate" ? .included : .checked
+            }
+        } else {
+            filter.included = category.map { [$0.key] } ?? []
+            filter.excluded = []
+        }
         selectedCategory = category
+        await reload()
+    }
+
+    /// Applies the filter panel; the quick category bar mirrors a single included tag.
+    func apply(_ next: BrowseFilter) async {
+        guard next != filter else { return }
+        filter = next
+        if let panel, panel.isDynamic {
+            let included = next.dynamic.compactMap { id, value -> String? in
+                guard let tag = categories.first(where: { panel.control(tagKey: $0.key)?.id == id }),
+                      value == .included || value == .checked else { return nil }
+                return tag.key
+            }
+            selectedCategory = next.dynamic.count == 1 && included.count == 1
+                ? categories.first { $0.key == included[0] } : nil
+        } else {
+            selectedCategory = next.included.count == 1 && next.excluded.isEmpty
+                ? categories.first { next.included.contains($0.key) } : nil
+        }
         await reload()
     }
 
@@ -53,7 +97,7 @@ final class SourceBrowseModel: ObservableObject {
         items = []
         page = 0
         hasMore = true
-        error = nil
+        error = nil; challenge = nil
         isLoading = false
         await loadMore()
     }
@@ -72,11 +116,11 @@ final class SourceBrowseModel: ObservableObject {
         guard hasMore, !isLoading else { return }
         let request = generation
         isLoading = true
-        error = nil
+        error = nil; challenge = nil
         defer { if generation == request { isLoading = false } }
         do {
-            let result = try await runtime.page(sourceName: source.name, page: page, loadedCount: Int32(items.count),
-                                                query: activeQuery, tag: selectedCategory)
+            let result = try await runtime.filteredPage(sourceName: source.name, page: page, loadedCount: Int32(items.count),
+                                                        query: activeQuery, selection: filter.selection)
             guard generation == request else { return }
             let known = Set(items.map(\.id))
             let fresh = result.filter { !known.contains($0.id) }
@@ -85,67 +129,150 @@ final class SourceBrowseModel: ObservableObject {
             hasMore = !fresh.isEmpty
         } catch {
             if !Task.isCancelled, generation == request {
-                self.error = error.localizedDescription
+                self.error = SourceErrorText.describe(error)
+                self.challenge = SourceErrorText.challenge(error)
             }
         }
     }
 
-    private func loadCategories() async {
-        categories = (try? await runtime.categories(sourceName: source.name)) ?? []
+    func loadCategories() async {
+        panelError = nil
+        do {
+            let loaded = try await runtime.filterPanel(sourceName: source.name)
+            panel = loaded
+            categories = loaded.quickTags
+        } catch {
+            if !Task.isCancelled { panelError = SourceErrorText.describe(error) }
+        }
     }
 }
 
 struct SourceBrowseView: View {
     @StateObject private var model: SourceBrowseModel
+    @EnvironmentObject private var sources: SourcesModel
     @Environment(\.isSearching) private var isSearching
+    @State private var editingFilter = false
+    @State private var settingsOpen = false
+    @State private var importingFiles = false
+    @State private var importMessage: String?
 
-    init(runtime: IosSources, source: IosSource) {
-        _model = StateObject(wrappedValue: SourceBrowseModel(runtime: runtime, source: source))
+    /// Imported files (本地漫画 / 本地小说): an import button instead of source settings.
+    private var isLocal: Bool { model.source.ecosystem == "LOCAL" }
+
+    init(runtime: IosSources, source: IosSource, initialQuery: String? = nil) {
+        _model = StateObject(wrappedValue: SourceBrowseModel(runtime: runtime, source: source, initialQuery: initialQuery))
     }
 
-    private let columns = [GridItem(.adaptive(minimum: 108, maximum: 180), spacing: 14, alignment: .top)]
+    @AppStorage("listMode.browse") private var mode = ContentListMode.grid
 
     var body: some View {
         ScrollView {
-            if !model.categories.isEmpty { categoryBar }
-            LazyVGrid(columns: columns, spacing: 18) {
-                ForEach(model.items, id: \.id) { item in
-                    NavigationLink {
-                        SourceDetailsView(runtime: model.runtime, content: item)
-                    } label: {
-                        PosterCard(runtime: model.runtime, content: item)
+            categoryBar
+            ContentCollection(runtime: model.runtime, items: model.items.map { ContentItem(content: $0) }, mode: mode,
+                              identifierPrefix: "source.content.",
+                              onItemAppear: { item in
+                                  if item.id == model.items.last?.id, model.error == nil { Task { await model.loadMore() } }
+                              }) { item in
+                SourceDetailsView(runtime: model.runtime, content: item.content)
+            } actions: { item in
+                if let url = URL(string: item.content.publicUrl), url.scheme?.hasPrefix("http") == true {
+                    ShareLink(item: url) { Label("分享", systemImage: "square.and.arrow.up") }
+                }
+                if isLocal {
+                    Button("删除文件", systemImage: "trash", role: .destructive) {
+                        Task {
+                            try? await model.runtime.removeLocal(content: item.content)
+                            await model.reload()
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("source.content.\(item.id)")
-                    .task { if item.id == model.items.last?.id, model.error == nil { await model.loadMore() } }
                 }
             }
-            .padding(.horizontal)
             footer
         }
         .navigationTitle(model.source.title)
         .navigationBarTitleDisplayMode(.inline)
-        .searchable(text: $model.query, placement: .navigationBarDrawer(displayMode: .automatic), prompt: "搜索")
+        // A search button in the toolbar (top right), as standard iOS list screens do, instead of a drawer.
+        .searchable(text: $model.query, placement: .toolbar, prompt: "在\(model.source.title)中搜索")
+        .searchToolbarBehavior(.minimize)
         .onSubmit(of: .search) { Task { await model.submitSearch() } }
         .onChange(of: model.query) { _, value in
             if value.isEmpty { Task { await model.clearSearch() } }
         }
         .refreshable { await model.reload() }
-        .task { await model.start() }
+        .task {
+            await sources.recordUsage(sourceName: model.source.name)
+            await model.start()
+        }
+        .toolbar {
+            // The minimized search sits with the other actions at the top right.
+            DefaultToolbarItem(kind: .search, placement: .topBarTrailing)
+            ToolbarItem(placement: .topBarTrailing) { ContentListModeMenu(mode: $mode) }
+            // Filtering stays on the chip at the start of the category row; the toolbar opens the source's settings.
+            ToolbarItem(placement: .topBarTrailing) {
+                if isLocal {
+                    Button("导入文件", systemImage: "plus") { importingFiles = true }
+                        .accessibilityIdentifier("browse.importLocal")
+                } else {
+                    Button("来源设置", systemImage: "gearshape") { settingsOpen = true }
+                        .accessibilityIdentifier("browse.settings")
+                }
+            }
+        }
+        .fileImporter(isPresented: $importingFiles, allowedContentTypes: LocalImport.contentTypes,
+                      allowsMultipleSelection: true) { result in
+            guard case .success(let urls) = result else { return }
+            Task {
+                importMessage = await LocalImport.run(urls, runtime: model.runtime)
+                await model.reload()
+            }
+        }
+        .alert("导入本地文件", isPresented: Binding(get: { importMessage != nil }, set: { if !$0 { importMessage = nil } })) {
+            Button("好") { importMessage = nil }
+        } message: {
+            Text(importMessage ?? "")
+        }
+        .sheet(isPresented: $settingsOpen) {
+            SourceSettingsView(runtime: model.runtime, source: model.source)
+        }
+        .sheet(isPresented: $editingFilter) {
+            if let panel = model.panel {
+                SourceFilterSheet(panel: panel, initial: model.filter) { next in Task { await model.apply(next) } }
+            } else {
+                FilterPanelPlaceholder(error: model.panelError) { await model.loadCategories() }
+            }
+        }
     }
+
 
     private var categoryBar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             GlassEffectContainer(spacing: 8) {
                 HStack(spacing: 8) {
+                    // Every source has the entry: an empty panel explains itself, a failed one can be retried.
+                    filterChip
+                    if !model.categories.isEmpty {
                     chip("全部", selected: model.selectedCategory == nil) { await model.select(nil) }
                     ForEach(model.categories, id: \.key) { tag in
                         chip(tag.title, selected: model.selectedCategory?.key == tag.key) { await model.select(tag) }
+                    }
                     }
                 }
                 .padding(.horizontal)
                 .padding(.vertical, 6)
             }
+        }
+    }
+
+    @ViewBuilder
+    private var filterChip: some View {
+        let button = Button { editingFilter = true } label: {
+            Label(model.filter.count > 0 ? "筛选 \(model.filter.count)" : "筛选", systemImage: "line.3.horizontal.decrease")
+        }
+        .accessibilityIdentifier("browse.filterChip")
+        if model.panel.map(model.filter.isActive) ?? false {
+            button.buttonStyle(.glassProminent)
+        } else {
+            button.buttonStyle(.glass)
         }
     }
 
@@ -163,8 +290,15 @@ struct SourceBrowseView: View {
     private var footer: some View {
         if let error = model.error {
             VStack(spacing: 8) {
-                Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.red)
+                Label(error, systemImage: model.challenge != nil ? "shield.lefthalf.filled" : "exclamationmark.triangle")
+                    .foregroundStyle(.red)
+                    .multilineTextAlignment(.center)
                     .accessibilityIdentifier("sources.error")
+                if let challenge = model.challenge {
+                    ChallengeVerifyButton(challenge: challenge, runtime: model.runtime, sourceName: model.source.name) {
+                        await model.retry()
+                    }
+                }
                 Button("重试") { Task { await model.retry() } }
                     .buttonStyle(.glass)
                     .accessibilityIdentifier("browse.retry")
@@ -173,72 +307,115 @@ struct SourceBrowseView: View {
         } else if model.isLoading {
             ProgressView().padding()
         } else if model.items.isEmpty {
-            ContentUnavailableView("没有内容", systemImage: "square.grid.2x2",
-                                   description: Text(model.query.isEmpty ? "此源暂未返回内容。" : "没有找到相关结果。"))
+            ContentUnavailableView("没有内容", systemImage: isLocal ? "folder" : "square.grid.2x2",
+                                   description: Text(!model.query.isEmpty ? "没有找到相关结果。"
+                                                     : isLocal ? "点右上角“+”导入 CBZ/ZIP 漫画，或 EPUB、TXT 小说。" : "此源暂未返回内容。"))
                 .accessibilityIdentifier("browse.empty")
         }
     }
 }
 
 /// 2:3 poster with the title underneath. Extension covers go through the source's client; others are plain URLs.
-struct PosterCard: View {
-    let runtime: IosSources
-    let content: IosSourceContent
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            CoverImage(runtime: runtime, content: content)
-                .aspectRatio(2 / 3, contentMode: .fit)
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            Text(content.title)
-                .font(.footnote.weight(.medium))
-                .lineLimit(2, reservesSpace: true)
-            if let summary = content.summary {
-                Text(summary).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-            }
-        }
-        .contentShape(Rectangle())
-    }
-}
-
+/// Fixed 2:3 frame: the image fills an overlay, so a cover's own aspect ratio can never resize the grid cell.
 struct CoverImage: View {
     let runtime: IosSources
     let content: IosSourceContent
+    /// Decorative use (panorama): no placeholder fill or icon while loading or when there is no cover.
+    var plain = false
     @State private var image: UIImage?
     @State private var failed = false
 
+    init(runtime: IosSources, content: IosSourceContent, plain: Bool = false) {
+        self.runtime = runtime
+        self.content = content
+        self.plain = plain
+        // Scrolling back re-creates lazy cells; start from the decoded cover instead of loading again.
+        _image = State(initialValue: CoverCache.shared.image(for: content))
+    }
+
     var body: some View {
-        ZStack {
-            Rectangle().fill(.quaternary)
-            if runtime.fetchesCovers(content: content) {
+        Rectangle().fill(plain ? AnyShapeStyle(.clear) : AnyShapeStyle(.quaternary))
+            .overlay {
                 if let image {
-                    Image(uiImage: image).resizable().scaledToFill()
-                } else if failed {
+                    // Original colours: bars and accessories would otherwise draw the cover as a template tint.
+                    Image(uiImage: image).renderingMode(.original).resizable().scaledToFill()
+                } else if !plain && (failed || !content.hasCover) {
                     placeholder
                 }
-            } else if let url = content.coverUrl.flatMap(URL.init(string:)) {
-                AsyncImage(url: url, transaction: Transaction(animation: .easeOut(duration: 0.2))) { phase in
-                    switch phase {
-                    case .success(let image): image.resizable().scaledToFill()
-                    case .failure: placeholder
-                    default: EmptyView()
-                    }
+            }
+            .clipped()
+            .accessibilityValue(image == nil ? (failed ? "失败" : "加载中") : "已加载")
+            .task(id: content.id) {
+                guard image == nil else { return }
+                let fetches = runtime.fetchesCovers(content: content)
+                guard fetches ? content.hasCover : content.coverUrl.flatMap(URL.init(string:)) != nil else {
+                    failed = true; return
                 }
-            } else {
-                placeholder
+                do { store(try await Self.load(runtime: runtime, content: content)) } catch {
+                    if !Task.isCancelled { failed = true }
+                }
             }
-        }
-        .clipped()
-        .task(id: content.id) {
-            guard runtime.fetchesCovers(content: content), content.hasCover, image == nil else { return }
-            // Extension covers go through the source's own client in the JVM, which serializes per source: keep at
-            // most two in flight so opening details is not queued behind a whole grid of covers.
-            guard await CoverGate.shared.enter() else { return }
-            defer { Task { await CoverGate.shared.leave() } }
-            do { image = try await runtime.cover(content: content).decodedImage() } catch {
-                if !Task.isCancelled { failed = true }
+    }
+
+    /// One request per cover even when several views show it at once (details thumbnail and panorama). The shared
+    /// request is cancelled only when every view waiting for it has gone, so scrolled-away grid cells still drop out
+    /// of the cover queue.
+    @MainActor private static var loading: [String: (task: Task<UIImage, Error>, waiters: Int)] = [:]
+
+    /// The cover through the shared cache and request queue, for views that cannot run their own loading task.
+    @MainActor
+    static func image(runtime: IosSources, content: IosSourceContent) async throws -> UIImage {
+        if let cached = CoverCache.shared.image(for: content) { return cached }
+        let image = try await load(runtime: runtime, content: content)
+        CoverCache.shared.store(image, for: content)
+        return image
+    }
+
+    @MainActor
+    private static func load(runtime: IosSources, content: IosSourceContent) async throws -> UIImage {
+        let key = "\(content.sourceName)|\(content.id)"
+        let task: Task<UIImage, Error>
+        if let entry = loading[key] {
+            task = entry.task
+            loading[key]?.waiters += 1
+        } else {
+            task = Task<UIImage, Error> {
+                // Android's cover loader: at most eight downloads and three decodes at a time across the app.
+                // Extension covers use the source's own client in the JVM, outside its per-source call order.
+                if runtime.fetchesCovers(content: content) {
+                    let artifact = try await gated(RequestGate.covers) { try await runtime.cover(content: content) }
+                    return try await gated(RequestGate.coverDecoding) { try await artifact.decodedImage() }
+                }
+                guard let url = content.coverUrl.flatMap(URL.init(string:)) else { throw URLError(.badURL) }
+                let data = try await gated(RequestGate.covers) { try await CoverCache.download(url) }
+                return try await gated(RequestGate.coverDecoding) { try await CoverCache.decode(data) }
             }
+            loading[key] = (task, 1)
         }
+        let waiter = CoverWaiter()
+        return try await withTaskCancellationHandler {
+            defer { release(key, task, waiter) }
+            return try await task.value
+        } onCancel: {
+            Task { @MainActor in release(key, task, waiter) }
+        }
+    }
+
+    @MainActor
+    private static func release(_ key: String, _ task: Task<UIImage, Error>, _ waiter: CoverWaiter) {
+        guard !waiter.released, let entry = loading[key], entry.task == task else { return }
+        waiter.released = true
+        if entry.waiters <= 1 {
+            loading[key] = nil
+            task.cancel()
+        } else {
+            loading[key]?.waiters -= 1
+        }
+    }
+
+    private func store(_ decoded: UIImage) {
+        CoverCache.shared.store(decoded, for: content)
+        withAnimation(.easeOut(duration: 0.2)) { image = decoded }
     }
 
     private var placeholder: some View {
@@ -248,34 +425,105 @@ struct CoverImage: View {
     }
 }
 
-/// Bounded concurrency for extension cover requests. Waiters whose view disappeared (task cancelled) never start.
-actor CoverGate {
-    static let shared = CoverGate(limit: 2)
-    private let limit: Int
-    private var running = 0
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+@MainActor private final class CoverWaiter { var released = false }
 
-    init(limit: Int) { self.limit = limit }
+/// Runs [body] while holding one of [gate]'s slots; a task cancelled while waiting never runs it.
+func gated<T>(_ gate: RequestGate, priority: Int = 0, ticket: Int? = nil,
+              _ body: () async throws -> T) async throws -> T {
+    guard await gate.enter(priority: priority, ticket: ticket) else { throw CancellationError() }
+    defer { Task { await gate.leave() } }
+    try Task.checkCancellation()
+    return try await body()
+}
 
-    /// Returns false when the calling task was cancelled while waiting; the slot is not held then.
-    func enter() async -> Bool {
-        if running < limit {
-            running += 1
-        } else {
-            await withCheckedContinuation { waiters.append($0) }
-        }
-        if Task.isCancelled {
-            leave()
-            return false
-        }
-        return true
+/// Decoded, downsampled covers shared by grids, lists and details. NSCache evicts under memory pressure.
+final class CoverCache: @unchecked Sendable {
+    static let shared = CoverCache()
+    private let cache: NSCache<NSString, UIImage> = {
+        let cache = NSCache<NSString, UIImage>()
+        cache.totalCostLimit = 64 * 1024 * 1024
+        return cache
+    }()
+
+    private func key(_ content: IosSourceContent) -> NSString { "\(content.sourceName)|\(content.id)" as NSString }
+    func image(for content: IosSourceContent) -> UIImage? { cache.object(forKey: key(content)) }
+    func store(_ image: UIImage, for content: IosSourceContent) {
+        let cost = Int(image.size.width * image.size.height * image.scale * image.scale * 4)
+        cache.setObject(image, forKey: key(content), cost: cost)
     }
 
-    func leave() {
-        if waiters.isEmpty {
-            running -= 1
-        } else {
-            waiters.removeFirst().resume()  // hand the slot over directly
+    /// Plain-URL covers (native CMS sources); decoding is bounded and off the main actor.
+    static func download(_ url: URL) async throws -> Data {
+        let request = URLRequest(url: url)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) { throw URLError(.badServerResponse) }
+        return data
+    }
+
+    static func decode(_ data: Data) async throws -> UIImage {
+        try await Task.detached(priority: .utility) {
+            guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+                  let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                    kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceCreateThumbnailWithTransform: true,
+                    kCGImageSourceThumbnailMaxPixelSize: 600,
+                  ] as CFDictionary) else { throw URLError(.cannotDecodeContentData) }
+            return UIImage(cgImage: image)
+        }.value
+    }
+}
+
+/// The filter sheet before the source described its filters: loading, or the failure with a retry.
+private struct FilterPanelPlaceholder: View {
+    let error: String?
+    let retry: () async -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if let error {
+                    ContentUnavailableView {
+                        Label("无法读取筛选条件", systemImage: "exclamationmark.triangle")
+                    } description: {
+                        Text(error)
+                    } actions: {
+                        Button("重试") { Task { await retry() } }.buttonStyle(.glassProminent)
+                            .accessibilityIdentifier("filter.retry")
+                    }
+                } else {
+                    ProgressView("正在读取筛选条件…")
+                }
+            }
+            .navigationTitle("筛选")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } }
+            }
         }
+        .presentationDetents([.medium])
+    }
+}
+
+/// Copies picked files into the app as local works; returns a summary when something needs saying.
+enum LocalImport {
+    static let contentTypes: [UTType] = [.zip, .epub, .plainText, UTType(filenameExtension: "cbz") ?? .data, .data]
+
+    @MainActor
+    static func run(_ urls: [URL], runtime: IosSources) async -> String? {
+        var imported: [String] = []
+        var failed: [String] = []
+        for url in urls {
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            do {
+                let content = try await runtime.importLocal(path: url.path, fileName: url.lastPathComponent)
+                imported.append(content.title)
+            } catch {
+                failed.append("\(url.lastPathComponent)：\(SourceErrorText.describe(error))")
+            }
+        }
+        if failed.isEmpty { return imported.count > 1 ? "已导入 \(imported.count) 个文件" : nil }
+        return (imported.isEmpty ? "" : "已导入 \(imported.count) 个文件。\n") + "未能导入：\n" + failed.joined(separator: "\n")
     }
 }

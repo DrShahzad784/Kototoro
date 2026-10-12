@@ -24,10 +24,10 @@ import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import org.skepsun.kototoro.core.prefs.ReaderAnimation
+import org.skepsun.kototoro.reader.core.PageCurlGeometry
+import org.skepsun.kototoro.reader.core.PagePoint
+import org.skepsun.kototoro.reader.core.PageTurnTransition
 import kotlin.math.abs
-import kotlin.math.atan2
-import kotlin.math.max
-import kotlin.math.min
 
 data class ComposeReaderPageTransform(
     val translationFactor: Float = 0f,
@@ -290,7 +290,7 @@ fun resolvePageCurlFromStart(
     isVertical: Boolean,
     isReadingReversed: Boolean,
     horizontalDragFraction: Float,
-): Boolean = isReadingReversed
+): Boolean = PageTurnTransition.curlFromStart(isReadingReversed)
 
 fun resolvePageCurlUnfolding(
     settledPage: Int,
@@ -299,25 +299,16 @@ fun resolvePageCurlUnfolding(
     isReadingReversed: Boolean,
     verticalDragFraction: Float = 0f,
     isVertical: Boolean = false,
-): Boolean = when {
-    targetPage < settledPage -> true
-    targetPage > settledPage -> false
-    isVertical -> verticalDragFraction > PAGE_CURL_DRAG_EPSILON
-    isReadingReversed -> horizontalDragFraction < -PAGE_CURL_DRAG_EPSILON
-    else -> horizontalDragFraction > PAGE_CURL_DRAG_EPSILON
-}
+): Boolean = PageTurnTransition.isCurlUnfolding(
+    settledPage, targetPage, horizontalDragFraction, isReadingReversed, verticalDragFraction, isVertical,
+)
 
 fun resolvePageCurlStartFraction(
     downFraction: Offset,
     isVertical: Boolean,
     curlFromStart: Boolean,
-): Offset {
-    if (isVertical) return downFraction
-    return Offset(
-        x = if (curlFromStart) 0f else 1f,
-        y = downFraction.y,
-    )
-}
+): Offset = PageTurnTransition.curlStartFraction(PagePoint(downFraction.x, downFraction.y), isVertical, curlFromStart)
+    .let { Offset(it.x, it.y) }
 
 data class ComposeReaderPageCurlGeometry(
     val topCurlOffset: Offset,
@@ -328,6 +319,7 @@ data class ComposeReaderPageCurlGeometry(
     val curlLineVector: Offset,
 )
 
+/** The shared fold geometry of `reader-core` ([PageTurnTransition.curlGeometry]) in Compose types. */
 fun calculatePageCurlGeometry(
     size: Size,
     progress: Float,
@@ -335,221 +327,26 @@ fun calculatePageCurlGeometry(
     isVertical: Boolean,
     isReversed: Boolean,
     isCurlUnfolding: Boolean = false,
-): ComposeReaderPageCurlGeometry {
-    val canonicalWidth = if (isVertical) size.height else size.width
-    val canonicalHeight = if (isVertical) size.width else size.height
-    if (canonicalWidth <= 0f || canonicalHeight <= 0f) {
-        return ComposeReaderPageCurlGeometry(
-            topCurlOffset = Offset.Zero,
-            bottomCurlOffset = Offset.Zero,
-            frontPath = emptyList(),
-            backPath = emptyList(),
-            angle = 0f,
-            curlLineVector = Offset.Zero,
-        )
-    }
-    val edge = calculatePageCurlEdge(
-        width = canonicalWidth,
-        height = canonicalHeight,
-        progress = progress,
-        startFraction = (if (isVertical) touchFraction.x else touchFraction.y).let { dragOrigin ->
-            if (isCurlUnfolding) 1f - dragOrigin else dragOrigin
-        },
-        isReversed = isReversed,
-    )
-    val topIntersection = lineLineIntersection(
-        Offset(0f, 0f), Offset(canonicalWidth, 0f), edge.top, edge.bottom,
-    ) ?: edge.top
-    val bottomIntersection = lineLineIntersection(
-        Offset(0f, canonicalHeight), Offset(canonicalWidth, canonicalHeight), edge.top, edge.bottom,
-    ) ?: edge.bottom
-    val topCurlOffset = if (isReversed) {
-        Offset(min(canonicalWidth, topIntersection.x), 0f)
-    } else {
-        Offset(max(0f, topIntersection.x), 0f)
-    }
-    val bottomCurlOffset = if (isReversed) {
-        Offset(min(canonicalWidth, bottomIntersection.x), canonicalHeight)
-    } else {
-        Offset(max(0f, bottomIntersection.x), canonicalHeight)
-    }
-    val frontPath = if (isReversed) {
-        listOf(
-            Offset(canonicalWidth, 0f),
-            topCurlOffset,
-            bottomCurlOffset,
-            Offset(canonicalWidth, canonicalHeight),
-        )
-    } else {
-        listOf(
-            Offset.Zero,
-            topCurlOffset,
-            bottomCurlOffset,
-            Offset(0f, canonicalHeight),
-        )
-    }
-    val backPath = calculatePageCurlBackPath(
-        width = canonicalWidth,
-        height = canonicalHeight,
-        topCurlOffset = topCurlOffset,
-        bottomCurlOffset = bottomCurlOffset,
-        isReversed = isReversed,
-    )
-    fun map(point: Offset): Offset = if (isVertical) Offset(point.y, point.x) else point
-    val mappedTop = map(topCurlOffset)
-    val mappedBottom = map(bottomCurlOffset)
+): ComposeReaderPageCurlGeometry = PageTurnTransition.curlGeometry(
+    width = size.width,
+    height = size.height,
+    progress = progress,
+    touchFraction = PagePoint(touchFraction.x, touchFraction.y),
+    isVertical = isVertical,
+    isReversed = isReversed,
+    isCurlUnfolding = isCurlUnfolding,
+).toComposeGeometry()
+
+internal fun PageCurlGeometry.toComposeGeometry(): ComposeReaderPageCurlGeometry {
+    fun PagePoint.offset() = Offset(x, y)
     return ComposeReaderPageCurlGeometry(
-        topCurlOffset = mappedTop,
-        bottomCurlOffset = mappedBottom,
-        frontPath = frontPath.map(::map),
-        backPath = backPath.map(::map),
-        angle = Math.PI.toFloat() - atan2(
-            bottomCurlOffset.y - topCurlOffset.y,
-            bottomCurlOffset.x - topCurlOffset.x,
-        ) * 2f,
-        curlLineVector = map(bottomCurlOffset - topCurlOffset),
+        topCurlOffset = topCurlOffset.offset(),
+        bottomCurlOffset = bottomCurlOffset.offset(),
+        frontPath = frontPath.map { it.offset() },
+        backPath = backPath.map { it.offset() },
+        angle = angle,
+        curlLineVector = curlLineVector.offset(),
     )
-}
-
-private data class PageCurlEdge(val top: Offset, val bottom: Offset)
-
-private fun calculatePageCurlEdge(
-    width: Float,
-    height: Float,
-    progress: Float,
-    startFraction: Float,
-    isReversed: Boolean,
-): PageCurlEdge {
-    val start = PageCurlEdge(Offset(width, 0f), Offset(width, height))
-    val middle = PageCurlEdge(Offset(width, height / 2f), Offset(width / 2f, height))
-    val end = PageCurlEdge(Offset(0f, 0f), Offset(0f, height))
-    val normalized = progress.coerceIn(0f, 1f)
-    val bottomEdge = if (normalized <= 1f / 3f) {
-        lerpEdge(start, middle, normalized * 3f)
-    } else {
-        lerpEdge(middle, end, (normalized - 1f / 3f) * 1.5f)
-    }
-    val topIntersection = lineLineIntersection(
-        Offset.Zero,
-        Offset(width, 0f),
-        bottomEdge.top,
-        bottomEdge.bottom,
-    ) ?: bottomEdge.top
-    val bottomIntersection = lineLineIntersection(
-        Offset(0f, height),
-        Offset(width, height),
-        bottomEdge.top,
-        bottomEdge.bottom,
-    ) ?: bottomEdge.bottom
-    val centerX = lerp(width, 0f, normalized)
-    val cornerBias = startFraction.coerceIn(0f, 1f) * 2f - 1f
-    val halfSlope = (topIntersection.x - bottomIntersection.x) / 2f * cornerBias
-    val edge = PageCurlEdge(
-        top = Offset(centerX + halfSlope, 0f),
-        bottom = Offset(centerX - halfSlope, height),
-    )
-    return if (isReversed) {
-        PageCurlEdge(
-            top = Offset(width - edge.top.x, edge.top.y),
-            bottom = Offset(width - edge.bottom.x, edge.bottom.y),
-        )
-    } else {
-        edge
-    }
-}
-
-private fun lerpEdge(start: PageCurlEdge, end: PageCurlEdge, fraction: Float): PageCurlEdge =
-    PageCurlEdge(
-        top = Offset(
-            lerp(start.top.x, end.top.x, fraction),
-            lerp(start.top.y, end.top.y, fraction),
-        ),
-        bottom = Offset(
-            lerp(start.bottom.x, end.bottom.x, fraction),
-            lerp(start.bottom.y, end.bottom.y, fraction),
-        ),
-    )
-
-private fun calculatePageCurlBackPath(
-    width: Float,
-    height: Float,
-    topCurlOffset: Offset,
-    bottomCurlOffset: Offset,
-    isReversed: Boolean,
-): List<Offset> {
-    val path = mutableListOf<Offset>()
-    if (isReversed) {
-        if (topCurlOffset.x > 0f) {
-            path += topCurlOffset
-            path += Offset(0f, topCurlOffset.y)
-        } else {
-            val intersection = lineLineIntersection(
-                topCurlOffset,
-                bottomCurlOffset,
-                Offset(0f, 0f),
-                Offset(0f, height),
-            ) ?: Offset.Zero
-            path += intersection
-            path += intersection
-        }
-        if (bottomCurlOffset.x > 0f) {
-            path += Offset(0f, height)
-            path += bottomCurlOffset
-        } else {
-            val intersection = lineLineIntersection(
-                topCurlOffset,
-                bottomCurlOffset,
-                Offset(0f, 0f),
-                Offset(0f, height),
-            ) ?: Offset(0f, height)
-            path += intersection
-            path += intersection
-        }
-    } else {
-        if (topCurlOffset.x < width) {
-            path += topCurlOffset
-            path += Offset(width, topCurlOffset.y)
-        } else {
-            val intersection = lineLineIntersection(
-                topCurlOffset,
-                bottomCurlOffset,
-                Offset(width, 0f),
-                Offset(width, height),
-            ) ?: Offset(width, 0f)
-            path += intersection
-            path += intersection
-        }
-        if (bottomCurlOffset.x < width) {
-            path += Offset(width, height)
-            path += bottomCurlOffset
-        } else {
-            val intersection = lineLineIntersection(
-                topCurlOffset,
-                bottomCurlOffset,
-                Offset(width, 0f),
-                Offset(width, height),
-            ) ?: Offset(width, height)
-            path += intersection
-            path += intersection
-        }
-    }
-    return path
-}
-
-private fun lineLineIntersection(
-    line1a: Offset,
-    line1b: Offset,
-    line2a: Offset,
-    line2b: Offset,
-): Offset? {
-    val denominator = (line1a.x - line1b.x) * (line2a.y - line2b.y) -
-        (line1a.y - line1b.y) * (line2a.x - line2b.x)
-    if (denominator == 0f) return null
-    val x1 = (line1a.x * line1b.y - line1a.y * line1b.x) * (line2a.x - line2b.x)
-    val x2 = (line1a.x - line1b.x) * (line2a.x * line2b.y - line2a.y * line2b.x)
-    val y1 = (line1a.x * line1b.y - line1a.y * line1b.x) * (line2a.y - line2b.y)
-    val y2 = (line1a.y - line1b.y) * (line2a.x * line2b.y - line2a.y * line2b.x)
-    return Offset((x1 - x2) / denominator, (y1 - y2) / denominator)
 }
 
 fun List<Offset>.toPath(): Path = Path().apply {
@@ -560,10 +357,6 @@ fun List<Offset>.toPath(): Path = Path().apply {
 }
 
 const val READER_PAGE_CAMERA_DISTANCE = 20_000f
-
-private const val PAGE_CURL_DRAG_EPSILON = 0.001f
-
-private fun lerp(start: Float, stop: Float, fraction: Float): Float = start + (stop - start) * fraction
 
 @Composable
 fun ComposeReaderSimulationPageShadow(

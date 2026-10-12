@@ -2,6 +2,10 @@ package org.skepsun.kototoro.ios
 
 import kotlinx.coroutines.runBlocking
 import org.skepsun.kototoro.core.source.SourceCall
+import org.skepsun.kototoro.core.source.SourceRemoteException
+import org.skepsun.kototoro.core.source.SourceErrorCode
+import org.skepsun.kototoro.core.source.SourceError
+import org.skepsun.kototoro.core.source.SourceBrowserSession
 import org.skepsun.kototoro.core.source.SourceChapter
 import org.skepsun.kototoro.core.source.SourceChapterContent
 import org.skepsun.kototoro.core.source.SourceContentImage
@@ -81,6 +85,61 @@ class IosSourcesTest {
             runtime.close()
         }
         assertEquals(true, closed)
+    }
+
+    @Test
+    fun challengesReachSwiftWithTheirOriginAndBrowserCookiesGoBack() = runBlocking {
+        val imported = mutableListOf<String>()
+        val runtime = IosSources(object : IosSourceTransport {
+            override fun exchange(requestJson: String): String {
+                val request = SourceProtocolJson.decodeFromString<SourceRequest>(requestJson)
+                val response = when (val call = request.call) {
+                    is SourceCall.ListContent -> SourceResponse(1, request.requestId, error = SourceError(
+                        SourceErrorCode.CHALLENGE_REQUIRED, "Browser verification required", "https://site.test"))
+                    is SourceCall.Preferences -> SourceResponse(1, request.requestId, error = SourceError(
+                        SourceErrorCode.RUNTIME_FAILURE, "Source operation failed"))
+                    is SourceCall.BrowserSession -> SourceResponse(1, request.requestId,
+                        SourceResult.BrowserSession(SourceBrowserSession("https://site.test", "UA/1")))
+                    is SourceCall.ImportCookies -> {
+                        imported += call.cookies
+                        SourceResponse(1, request.requestId, SourceResult.CookiesImported(call.cookies.size))
+                    }
+                    else -> error("Unexpected call: $call")
+                }
+                return SourceProtocolJson.encodeToString(response)
+            }
+            override fun close() {}
+        })
+        val challenged = assertFailsWith<SourceRemoteException> { runtime.list(source.name, 0) }
+        assertEquals(IosChallenge("https://site.test"), IosSourceErrors.challenge(challenged))
+        assertEquals("该站点需要通过 Cloudflare 等浏览器验证", IosSourceErrors.message(challenged))
+        val failed = assertFailsWith<SourceRemoteException> { runtime.preferences(source.name) }
+        assertNull(IosSourceErrors.challenge(failed))
+        assertEquals("来源请求失败，可能是网络问题或站点已变更", IosSourceErrors.message(failed))
+        assertNull(IosSourceErrors.message(IllegalStateException("not a source error")))
+        assertEquals(IosBrowserSession("https://site.test", "UA/1"), runtime.browserSession(source.name))
+        assertEquals(1, runtime.importCookies(source.name, "https://site.test", listOf("cf_clearance=x; Path=/")))
+        assertEquals(listOf("cf_clearance=x; Path=/"), imported)
+    }
+
+    @Test
+    fun libraryRestoredWorksAcceptTheirSourcesCoverButNotAnotherSources() = runBlocking {
+        // The library stores its own locale/content type for a source; the runtime answers with its descriptor.
+        val stored = content.copy(source = source.copy(locale = "", contentType = "MANGA"))
+        var answer = source
+        val runtime = IosSources(object : IosSourceTransport {
+            override fun exchange(requestJson: String): String {
+                val request = SourceProtocolJson.decodeFromString<SourceRequest>(requestJson)
+                check(request.call is SourceCall.Cover)
+                val result = SourceResult.Cover(SourceCoverArtifact(answer, content.id, "$hash.img", hash, 123, "image/png"))
+                return SourceProtocolJson.encodeToString(SourceResponse(1, request.requestId, result))
+            }
+            override fun close() {}
+        })
+        assertEquals(IosSourceImage("$hash.img", hash, 123), runtime.cover(IosSourceContent(stored)))
+        answer = source.copy(name = "MIHON_1")
+        assertFailsWith<IllegalStateException> { runtime.cover(IosSourceContent(stored)) }
+        Unit
     }
 
     @Test

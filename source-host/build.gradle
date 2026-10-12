@@ -21,6 +21,8 @@ dependencies {
 	implementation project(':dex-convert')
 	implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:${libs.versions.coroutines.get()}"
 	testImplementation 'org.junit.jupiter:junit-jupiter:5.8.2'
+	// Browser cookie import is reflective over the source's own OkHttp; tests drive a real client.
+	testImplementation libs.okhttp
 	testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.8.2'
 }
 

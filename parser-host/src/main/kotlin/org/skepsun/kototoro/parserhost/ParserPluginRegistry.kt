@@ -316,7 +316,13 @@ class ParserPluginRegistry(
 
     companion object {
         /** Same default as the Android `jar_priority_order`. */
-        val DEFAULT_PRIORITY = listOf("kototoro-parsers", "kotatsu-parsers-redo", "uma", "kotatsu-parsers")
+        /** Short ids (bundled / desktop) and the repository package names the same plugins install under. */
+        val DEFAULT_PRIORITY = listOf(
+            "kototoro-parsers", "org.skepsun.kototoro.parsers",
+            "kotatsu-parsers-redo", "org.skepsun.kototoro.parsers.redo",
+            "uma", "github.InvalidDavid.UMA.uma",
+            "kotatsu-parsers",
+        )
         private val ID_PATTERN = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
     }
 }

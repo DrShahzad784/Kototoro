@@ -5217,3 +5217,676 @@ type 3/4 爬虫与加密配置。Android `TVBoxRepository` 尚未改为消费 `:
 
 **边界**：APK/DEX 转换仍在 Mac 进行；没有用户安装/更新界面；WKWebView/Cloudflare、位图重绘、JS 引擎未接入；
 外挂字幕/音轨尚未接入 AVPlayer；Zero 解释执行下千集级详情耗时较长（AnimeGG 约 30–60 秒），需要真机基线。
+
+## 95. iOS 漫画下载队列、暂停与按页恢复（2026-10-10）
+
+已有产品闭环的当前状态见 [主要功能实施记录](./ios-product-implementation-2026-10.md)。本次继续推进下载生命周期：
+
+- 单章／多选下载通过同一个应用级 `ReaderDownloadQueue`，退出阅读器后前台任务继续。
+  设置和阅读器面板均提供下载管理入口，可暂停／继续、重试与移除任务；移除任务保留离线图片。
+- 队列在 `sources/downloads/queue.json` 持久化（fixture 使用独立 `sources-fixture`）；
+  任务按来源／作品／章节身份去重，最多 500 条／32 MiB，写入成功后才发布状态。
+  `IosDownloadArchive` 保留源 memo、所选章节与精确 64 位身份，整部作品章节目录不复制进每个任务。
+- 已进入 JNI 的网络调用无法被 Swift 直接打断；暂停会保存状态并发出取消，worker 等旧调用结束再执行后续任务。
+  进入后台暂停正在执行与等待中的任务；中断的执行任务重启后恢复为暂停，用户手动继续。
+  按 [Swift 协作取消](https://developer.apple.com/documentation/swift/task/checkcancellation%28%29) 与
+  [ScenePhase 生命周期](https://developer.apple.com/documentation/swiftui/scenephase) 接入。
+- 下载逐页保存完整页面上下文与图片 artifact 检查点。继续时重新校验已存图片的长度、SHA-256 和解码；
+  完整保存后原子发布离线清单，损坏图片重新获取，损坏清单重新请求页面。
+  复用源客户端下载和原生 ImageIO，无新增网络栈、数据库、依赖升级或共享源协议分叉。
+- Native 15 项通过；Swift 队列 5 项、图片 2 项和分类重启 1 项通过；
+  嵌入式 JVM fixture 阅读流程通过，下载管理及重启保留记录截图已检查。
+  `compileKotlinIosArm64` 通过；日志／截图位置见产品记录。
+
+**边界**：前台漫画队列支持页面级恢复，没有 HTTP 字节级断点续传或系统后台调度。
+真实慢源中断的完整恢复、长期大队列和真机存储／内存压力尚未验收；小说／视频下载、
+WKWebView、真机 Zero 与分发门槛继续按原计划推进。
+
+## 96. iOS 原生扩展管理（2026-10-10）
+
+- 对照 Android `UnifiedSourcesScreen` 的仓库、扩展状态、生态与语言管理，采用 SwiftUI 原生
+  `List`、分段 `Picker`、`searchable`、工具栏 `Menu`、添加 `Form` 与详情 sheet。
+  添加表单从常驻列表移入工具栏，扩展按更新／已安装／语言分区，仓库单独管理。
+- 扩展详情展示名称、版本、仓库、所含来源、成人标记与可展开包信息；沿用设备转换、安装与确认卸载。
+  成人发现与浏览页共用偏好，已安装成人扩展仍保留管理入口。默认无 JVM 构建可浏览目录。
+- Swift 列表投影按生态＋包名合并多个仓库，优先最高版本，同版本按仓库身份稳定选择。
+  仓库详情保留各自目录，安装绑定明确的候选仓库；旧版本禁止覆盖较新安装。
+  仓库独立刷新／报错，失败保留已有目录；移除仓库不删除已安装扩展。
+- `SourceHostManagement` 的列表回复补充可选名称／版本／来源／语言／成人元数据，Swift 兼容旧回复。
+  `IosExtension` 只投影共享索引的来源名称和图标，继续复用同一解码器、仓库表与运行时。
+  `ExtensionPresentation` 负责派生与筛选，`RepositoriesModel` 负责加载和安装编排；无新增依赖。
+- Native 15 项、host 会话 8 项、默认 Swift／UI 10 项定向回归通过，真机 Native 切片编译通过。
+  添加、列表、仓库与扩展详情截图已实际检查，位于 `iosApp/build/extensions-final-attachments/`。
+  日志与真实安装验证见 [产品实施记录](./ios-product-implementation-2026-10.md)。
+
+**边界**：本次改善既有四类扩展的管理体验，不扩大生态；真机 JVM、签名分发、iPad／横屏与
+辅助功能运行验收仍按原计划单独推进。
+
+## 97. iOS 图书馆备份、浏览筛选、详情页与阅读手势（2026-10-11）
+
+**备份与恢复**（设置 → 备份与恢复）：与 Android/Kotatsu 同一 ZIP 格式（每节一个 JSON 数组，`index` 必须唯一）。
+
+- 桌面 `DesktopLibraryBackup` 的导出与合并规则抽到 `core-library` 的 `LibraryBackup`（commonMain），
+  经 `LibraryBackupInput`／`LibraryBackupOutput` 与平台归档解耦；桌面保留原公开接口，只负责 JVM ZIP 与临时文件。
+  合并规则不变：分类按标题合并、较新的 `updatedAt` 胜出、统计取较大值、旧 work 节按锚点投影、本地表从不清空。
+- iOS `IosBackupZip` 用 Kotlin/Native 的系统 zlib 读写（STORED/DEFLATE、数据描述符；拒绝 ZIP64、加密、
+  重复/含路径的节名，压缩包 ≤256 MiB、单节 ≤256 MiB、总解压 ≤1 GiB）。预览前校验每节 CRC 与长度并统计行数，
+  预览持有内存快照，选中文件之后的变化不影响确认后的恢复；导出先写 `.partial` 再原子改名，目标已存在时拒绝。
+- SwiftUI：系统文件导出器保存、文件选择器读取（安全作用域），预览列出各节数量与 iOS 不恢复的节
+  （设置、追踪账号等）。同一视图同时挂 `fileImporter` 与 `fileExporter` 只会生效一个，二者分别挂在各自按钮上。
+
+**浏览筛选**：`IosSources.filterPanel` 投影源描述的排序方式、多标签/排除能力与筛选选项（标签组、连载状态、
+内容分级、类型、受众、语言、年份）；`filteredPage` 以稳定 key 解析回源自己的 `SourceTag`，
+不支持“搜索 + 筛选”的源在搜索时只发送关键字。SwiftUI 筛选表单：标签点按包含、再次点按排除，单选组/单标签源
+自动替换；快捷分类胶囊与筛选面板互相同步。
+
+**源名称与图标**：`SourceHostRuntimes.titles` 把 parser-host 插件的可读标题并入 host 管理回复的 `sourceTitles`
+（此前仅 Mihon 扩展有标题，JAR 源显示枚举名）。`SourceDescriptor.homepage`（可选，旧 host 兼容）由
+parser 的 `domain`、Mihon/Aniyomi 的 `baseUrl` 提供；iOS 按需描述可见行，取站点 `apple-touch-icon.png`/`favicon.ico`，
+磁盘缓存，失败一周后重试，期间显示按名称着色的首字图标。
+
+**封面网格**：封面固定为 2:3 占位框并以 overlay 填充裁切，图片自身比例不再撑开网格；解码后的封面进入
+`CoverCache`（NSCache，64 MiB 成本上限），懒加载格子重建时直接取缓存，不再回滚后重新转圈。原生 CMS 封面改为
+ImageIO 降采样（最长边 600 px）。
+
+**详情页**：参照 Android——模糊封面背景、封面阴影、标题/别名/作者/来源、状态/评分/章节数标签、
+主按钮（开始/继续阅读或播放，显示目标章节）+ 收藏按钮、标签流式布局、可展开简介；章节列表支持搜索、
+正倒序（持久化）、多分支选择（默认进入正在阅读的分支）、当前章高亮与进度、已读章节淡化、扫描组与日期；下拉刷新强制重取详情。
+
+**阅读手势与分页手感**：分页模式直接使用系统 `.paging`（对应原生分页滚动：一次一页、系统松手动画）；此前包装成
+自定义 `ScrollTargetBehavior` 后失去原生分页，松手动画慢且快速轻扫会按速度投射到后面多页。新增 Android 式点击区域：
+左右 30% 与上下 20% 翻页（向左阅读模式镜像，可整体反转或关闭），中间显示/隐藏控件；连续模式点击滚动 85% 视口；
+越过首末页切换相邻章节，向前切章从上一章末页开始。双击缩放与双指缩放保留。
+
+**验证**（arm64 模拟器 iPhone 18 Pro / iOS 27，日志在 `iosApp/build/`）
+
+- `:desktop-runtime:test` 备份 16 项（抽取后）、`:source-host:test` 94、`:parser-host:test` 23（2 跳过）、
+  `:core-source:jvmTest` 53 通过；新增会话回归验证插件标题进入管理回复。
+- `:ios-shared:iosSimulatorArm64Test` 18 项通过：新增导出→另一数据库预览/合并（同名分类合并、二次合并幂等、
+  书签/进度保留）、Python `zipfile` 流式生成的 Android 风格 ZIP（数据描述符 + 不支持的 `settings` 节）、
+  损坏/非 ZIP/缺失文件在写入前拒绝。iOS 导出文件经 `unzip -t` 与 Python `zipfile` 交叉读取通过。
+- 默认构建 UI：`BackupFlowTests` 经系统文件导出器保存到“我的 iPhone”→ 文件选择器选回 → 预览 → 合并；
+  CMS 用例新增筛选面板与分类胶囊同步、重置恢复全部列表；其余默认用例（分类重启、CMS 收藏/续播、仓库管理、
+  下载队列、链接解析等）通过。`LibraryPersistenceTests` 因设备上累积分类超出首屏而改为滚动查找。
+- JVM fixture 预览：阅读器端到端新增点击区域翻页（左缘前进、右缘后退、中间切换控件），换章/下载/重启续读与
+  6 种方向×模式的居中用例通过（居中用例末尾复位步骤偶发一次失败，单独重跑通过）。
+- 真实扩展预览（重新 `stage-mihon-preview.py`）：MangaDex 列表显示“MangaDex”与站点图标，阅读图片通过；
+  详情/浏览/筛选/阅读截图已实际检查。`:app:compileDebugKotlin`、`:core-library:compileCommonMainKotlinMetadata`、
+  `:ios-shared:compileKotlinIosArm64` 与文档构建通过。
+
+**边界**：备份不含设置、追踪账号、保存的筛选与扩展仓库（预览中列出为“iOS 暂不恢复”）；Mihon 动态 FilterList 控件已在
+§98 接入；源图标依赖站点公开 favicon；真机手感与辅助功能待验收。
+
+## 98. iOS 扩展原生筛选控件与解析器扩展筛选项（2026-10-11）
+
+**范围**：Mihon、Tsundoku（经 `MihonSourceRuntime`）与 Aniyomi（`AniyomiSourceRuntime`）声明
+`isDynamicFilteringSupported` 时，`IosSources.filterPanel` 额外调用 `getDynamicFilters`，失败时回退到原标签投影。
+`IosFilterPanel.controls` 以 `IosFilterControl` 树暴露扩展自己的 FilterList（header/separator/checkbox/tristate/
+select/sort/text/group/unsupported），初始值来自扩展当前状态；`IosFilterValue` 为 Swift 友好的类型化值，
+`IosFilterSelection.dynamic` 只携带与默认不同的控件，由 Kotlin 按控件类型转换为 `SourceFilterChange`
+（越界索引/未知 ID 丢弃，排序索引 < 0 表示清除），host 端仍按 `MihonFilterRules.changes(strict)` 校验。
+JAR 解析器（kototoro/kotatsu parsers）按能力新增年份区间、原作语言（沿用 Android：选项同 `availableLocales`）
+与作者输入；不修改 parser-host 映射与协议。
+
+**界面**：`SourceFilterSheet` 对动态面板按扩展 header 分节；开关、三态/下拉/排序为菜单 Picker，排序可切换升序，
+文本为行内输入框；只含勾选/三态的分组（如类型）折叠为可展开的胶囊（点击：包含 → 排除 → 不限），混合分组
+递归嵌套；未知控件显示“暂不支持”。标签搜索同时过滤分组胶囊。快捷分类栏对动态源只列真实勾选/三态，
+不再出现排序值或“📝 文本”伪标签，并与面板编辑同一原生控件。搜索激活时系统隐藏工具栏按钮，分类栏前新增
+“筛选”胶囊（带已选数量），搜索中也可打开面板。
+
+**验证**：
+- `:ios-shared:iosSimulatorArm64Test` 20 项通过，新增 `IosSourceFiltersTest`：类型化转换、快捷标签、
+  清除排序/越界丢弃，以及解析器年份区间/原作语言/作者。
+- JVM fixture 预览：`testExtensionFilterControlsReachNativeFilterList` 修改开关、三态、下拉、排序+升序、文本、
+  二级嵌套分组，fixture 搜索返回的原生状态与预期一致；重开面板保持状态，重置恢复扩展默认。
+  `SourceRuntimeTests` 全部 3 项通过。
+- 真实扩展预览：`testFilterPanelsAcrossEcosystems` 对再漫画（Mihon）、AllNovelFull（Tsundoku）、
+  AnimeGG（Aniyomi）、MangaDex（JAR）打开面板、修改一项并成功加载筛选结果；截图已检查各自原生控件。
+- 默认构建 `VideoSourceTests`（苹果 CMS 标签筛选）通过。
+
+**边界**：Mihon 的排序方式选择（人气/最新）在应用筛选后与 Android 相同地由扩展搜索决定；保存的筛选预设、
+扩展自定义控件类型仍未支持。
+
+## 99. iOS 仓库深链闪退与无库版本标记扩展（2026-10-11）
+
+**问题与修复**：
+- 从仓库网页点“导入”跳转应用即闪退：`onOpenURL` 打开的仓库 sheet 挂在 `environmentObject` 之外的修饰链上，
+  `RepositoriesView` 读取 `LibraryModel` 时触发 `EnvironmentObject.error()`（模拟器 `simctl openurl` 复现，
+  崩溃报告定位到 RepositoriesView.body）。sheet 内容现显式注入 library/sources/downloads。
+- 与 Android 清单一致，iOS 额外登记 `tachiyomi://`、`aniyomi://`、`anikku://` 的 `add-repo` 链接：`kind` 参数优先，
+  缺省时按 scheme 推断（tachiyomi/kototoro → MIHON，aniyomi/anikku → ANIYOMI）。
+- 安装第三方仓库（如 LittleSurvival/copymanga-copy20）的 Mihon 扩展报 `UNSUPPORTED_LIBRARY`：这些 APK 清单没有
+  `tachiyomix.extensionLib`，Mihon/Android 加载器本就按 versionName 推断（1.4.85 → 1.4）。`MihonJarInspector`
+  对 Mihon 与 Tsundoku 统一从 versionName 推断，Aniyomi 规则不变；受支持范围仍为 1.4–1.6。
+
+**验证**：`:source-host:test` 95 项通过（新增无标记 1.4.85 接受、1.3.2 拒绝）；`RepositoryLinkTests` 3 项通过；
+真实扩展预览重新构建后，`testExternalRepositoryLinkImportsAndInstallsMarkerlessApk` 通过外部深链打开应用、
+导入该仓库并安装 VomicMH（CopyManga 带 NSFW 标记默认隐藏）；`ProductFlowTests` 其余 2 项（本地仓库 APK
+转换安装、CMS 收藏/历史/续播）通过。
+
+**边界**：真机上的深链与安装需在设备上复测；安装失败的 host 错误码已映射为中文说明并保留原码。
+
+## 100. iOS 详情页全景封面（2026-10-11）
+
+**实现**：`DetailsPanorama` 对照 Android `AnimatedPanoramaBackdrop`：封面全宽铺在详情页顶部并延伸到状态栏/导航栏
+下方，按预设模糊（`blur% × 18pt`）、顶部不透明度与渐隐范围遮罩（同 Android 的 0.18–0.82 起点、0.96 结束、
+0.35/0.70 中间点）融入分组背景。三种预设（清晰/均衡/柔和）与两种布局沿用 Android 数值：顶部横幅（半屏，默认）
+与全屏背景。顶部横幅随列表滚动移出、下拉时拉伸；可选缓慢平移缩放动画（系统“减弱动态效果”时关闭）。
+滚动偏移来自 `onScrollGeometryChange`；导航栏标题在头部滚出后才显示。头部为横幅预留 48pt（横幅高约 0.95 屏宽，上限半屏），标题信息叠在
+渐隐区。设置页新增“详情页”分组（开关/布局/效果/动画/跟随滚动，`@AppStorage`）；关闭时回退到原模糊背景。
+`CoverImage` 新增无占位的装饰模式；同一封面的并发请求（详情缩略图与全景）合并为一次，所有等待者离开后才取消，
+保留网格快速滚动时退出封面队列的行为。
+
+**验证**：真实扩展预览 `testDetailsPanoramaHeader`（MangaDex 详情静止/滚动/回顶截图已检查）与
+`testJarMangaPagesRender` 通过；JVM fixture `SourceRuntimeTests` 3 项通过。章节行因头部变高而落在首屏之下，
+UI 测试统一改用 `revealChapter`（详情加载后滚动直到首个章节行出现）。
+
+**边界**：封面沿用 600px 解码结果，清晰预设下大屏放大会略软；滚动联动在真机上的帧率待验收。
+
+## 101. iOS 作品库与统一作品列表显示模式（2026-10-11）
+
+**作品库**：第一个标签页由“漫画库”改为“作品库”（Library），独立为 `LibraryView`。收藏作品默认以 2:3 封面网格
+展示（阅读进度显示为封面底部进度条），支持标题／作者搜索与“最近更新／标题／阅读进度”排序。收藏分类改为顶部
+单行可横滑的玻璃胶囊（全部 + 各分类，附作品数），点选筛选、长按重命名或删除；新建分类保留在工具栏。
+`IosLibrary` 新增 `renameCategory`（保留排序、追踪与书架可见性）与 `removeCategory`（同 Android：同一事务删除该
+分类的收藏行并软删分类、清理章节；作品的其他分类保留，仅在该分类中的作品取消收藏）。
+
+**统一显示模式**：`ContentCollection` 对照 Android `ListMode` 的列表、详细列表、网格、紧凑网格（标题叠加在封面
+渐变上）四种模式，以 `LazyVGrid`／`LazyVStack`、`Menu`＋`Picker` 实现；作品库、来源浏览、历史与更新共用，
+各页面以 `@AppStorage`（`listMode.library/browse/history/updates`）分别记住选择。详细列表显示作者、来源、
+标签与纯文本简介；更新记录以角标显示新增章节数。上下文菜单提供整理分类／取消收藏、删除记录或分享。
+浏览页的分页、`source.content.` 标识与筛选不变；原 `PosterCard`／`LibraryContentRow` 移除。
+
+**验证**：`:ios-shared:iosSimulatorArm64Test` 21 项通过（新增分类重命名／删除保留其他分类成员关系）；
+真实扩展预览 `testDisplayModesInBrowseAndLibrary` 在 MangaDex 浏览页与作品库逐一切换四种模式并截图检查，
+结束时取消测试收藏以免污染共享模拟器数据。默认构建全量 UI 中分类持久化改为按分类胶囊存在性断言、CMS 闭环按
+作品标题定位后通过；JVM fixture `SourceRuntimeTests` 3 项通过，居中用例末尾复位等待旋转完成后不再偶发失败。
+
+**边界**：Android 的电影网格（16:9）与网格尺寸滑杆、分类拖拽排序与“在书架显示”开关尚未移植。
+
+## 102. iOS 网格尺寸/电影网格、TVBox 并入扩展管理、JAR 插件安装与来源开关（2026-10-11）
+
+**显示模式**：`ContentListMode` 增加电影网格与紧凑电影网格（16:9，标题叠加于紧凑版），共六种，与 Android `ListMode`
+一致；网格尺寸 50–150%（`list.gridSize`，全局）按 Android 共享卡片几何计算目标宽度（海报 96pt、电影 176pt 夹在
+160–264），`LazyVGrid(.adaptive)` 的列数公式与 Android 相同。显示选项改为原生 popover：六个模式磁贴、网格尺寸
+滑杆（列表模式禁用）及页面附加项（作品库排序）。
+
+**TVBox 并入扩展管理**：苹果 CMS/TVBox 最早作为独立原生能力（§93）在浏览页单独入口，扩展管理（§96）后来已支持
+`kind=TVBOX`。现移除浏览页“添加源”按钮与独立表单，添加仓库表单在 TVBox 类型下提供可选站点名称；扩展管理“仓库”页
+在扩展仓库之后列出“影视站点”，可滑动/长按删除。浏览页不再单独分区：TVBox 与 Mihon/Tsundoku/Aniyomi/JAR 作为同级
+生态分组，行样式、图标与搜索一致；没有任何来源时引导至扩展管理（默认构建预选 TVBox）。
+
+**JAR 插件**：
+- 旧格式 JSON 索引仓库此前以索引所在目录命名（GitHub 仓库普遍显示为“repo”），现同 Android `deriveRepoName`：GitHub 托管
+  为“owner/repo”，已保存的“repo”在读取时修正。
+- 语言筛选会隐藏 `all`/`multi` 插件，导致扩展页看不到 JAR 安装入口；语言无关的包现在在任意语言筛选下都显示。
+  成人插件（k-parsers-r 的 `nsfw: 1`）在仓库详情中提示“另有 N 个成人内容扩展已隐藏”并可一键显示。
+- 实测 kototoro-parsers、k-parsers-r 与 UMA 的 JAR 只含 `classes.dex`，须在设备上由仅解释器的 Zero JVM 转换：
+  本机 HotSpot `-Xint` 转换 kototoro-parsers 需 26 s（JIT 2.2 s），设备约一分钟，k-parsers-r（5.6 MB DEX）数分钟；
+  转换结果确定（两次 SHA 相同）。安装时显示大小与预计耗时，并关闭自动锁屏、申请后台任务时间。
+- 嵌入 JVM 堆原为 `-Xmx128m`，两个大型插件同时加载时 `OutOfMemoryError`；现由 Swift 按物理内存 1/8 设定（256–768 MB）。
+- 每次插件安装原会 `openRuntimes` 重新加载全部插件并保留旧副本到会话结束（内存随安装次数增长）。`SourceHostRuntimes`
+  新增 `update`：单个插件安装/卸载在现有 registry 中原地 `replace`/`unload`（先构建校验再持久化），其余插件不动，
+  仅复杂变更回退完整重建。
+- 安装/卸载后删除 `extensions/` 中未被安装记录引用的转换产物，会话启动时清理中断转换遗留的临时文件。
+- 预览随包插件 id 改为仓库包名 `org.skepsun.kototoro.parsers`，从仓库安装时替换随包副本而非重复加载；
+  `DEFAULT_PRIORITY` 补充仓库包名别名，使同名来源按既定插件优先级解析。
+- 启动阶段计时输出到 stderr（`[source-host] …`）；当前真实预览启动：平台 1.1 s、7 个扩展 1.0 s、插件 3.1 s。
+
+**来源开关**：状态写入共享 `sources` 表（`MangaSourcesDao.setEnabled`，随备份同步，与 Android 一致）。管理回复为每个扩展/
+插件附带 `sourceIds`，`IosSource` 得到所属 `group` 与该组语言数；未显式设置的来源按默认规则：多语言扩展/插件只开启
+系统首选语言（前三个）与多语言来源，单语言扩展与影视站点全部开启。扩展管理新增“来源”页：按扩展分组（组标题显示
+已启用/总数，菜单提供全部开启/关闭/仅开启我的语言）、已启用/未启用筛选，并复用搜索、语言、生态与成人设置；扩展详情
+同样列出其来源开关。浏览页只显示已启用来源，列表行可滑动停用，底部“N 个来源未启用 · 管理来源”。
+
+**浏览页布局与筛选**：列表/网格（紧凑图标磁贴，按生态分组）两种布局；“显示”菜单（保持展开）包含布局、内容类型
+（漫画/小说/视频）、来源类型（存在的生态）与成人内容开关，筛选以“隐藏集合”存储，新生态默认显示。
+
+**分组、排序与置顶**：浏览页可按来源类型、内容类型分组或不分组（`sources.grouping`）；排序为手动顺序或名称。置顶与
+手动位置写入同一 `sources` 表的 `pinned`/`sort_key`（与 Android 一致，`IosLibrary.sourceSettings/setSourcePinned/
+setSourceOrder`；保存顺序时为尚无记录的来源写入其当前生效的开关，不改变启用状态）。置顶来源在任何分组下都位于顶部
+“置顶”分区并带图钉标记，列表行右滑置顶/取消置顶，网格长按菜单同样提供；“调整顺序…”打开原生拖动排序表（置顶与其余
+分区分别排序）。
+
+**验证**：`:source-host:test` 96 项、`:parser-host:test`、`:ios-shared:iosSimulatorArm64Test` 23 项通过（新增仓库命名、
+来源开关持久化、插件原地更新与产物清理、`sourceIds`）；真实扩展预览 `testDisplayModesInBrowseAndLibrary`（六种模式与
+网格尺寸）、`testSourceSwitchesLayoutAndFiltersInBrowse`（停用后从浏览消失、默认语言规则、网格与内容类型筛选）通过；
+默认构建 `testBrowseGroupingPinningAndOrder`（三种分组、置顶分区、排序表）与 CMS 导入/播放用例通过，
+截图已检查；JAR 仓库测试确认名称与安装入口，kototoro-parsers 安装成功。
+
+**边界**：大型 DEX 插件首次安装仍需数分钟；根本解法是仓库同时发布 JVM 字节码版本（或预转换产物），由 iOS 直接安装。
+真机报告的 JAR 安装 “Failed requirement” 未在模拟器复现，需真机日志确认具体校验点。
+“新来源”提示与按使用频率排序未移植。
+
+## 103. iOS 播放器与全局搜索验收（2026-10-11）
+
+**播放器**：使用 `AVPlayerLayer` 展示视频，自定义一套控制栏，避免系统播放器与应用关闭按钮重叠。
+单击显示／隐藏控制栏，播放时 3.5 秒后自动隐藏，暂停时保持显示；支持上一集／下一集、前后跳转 10 秒、
+进度拖动、播放速度、扩展返回的多线路、音轨／字幕菜单，以及双击切换适应／填充。
+AirPlay 与画中画使用系统控制器。UI 测试通过 `playerControl` 在操作前显示控制栏。
+
+**搜索**：底部新增独立搜索标签，搜索收藏／历史与已启用来源，每次最多并发请求四个来源。
+来源按置顶和手动顺序排列，分别展示加载、结果或失败；支持重试失败来源、内容类型筛选、仅搜索置顶来源、
+最近搜索，以及“更多”携带查询进入来源列表。来源列表使用顶部搜索按钮。
+首次进入搜索页曾只显示最近搜索而没有输入框：按
+[Apple 的搜索标签示例](https://developer.apple.com/videos/play/wwdc2025/256/)，
+将 `.searchable` 放到 `TabView`，查询通过绑定交给搜索页；来源标题的测试标识只挂在标题文本，
+避免覆盖“更多”按钮自身的标识。
+底栏搜索要求与四个导航标签分离，使用系统 `Tab(role: .search)` 及
+[`.tabViewSearchActivation(.searchTabSelection)`](https://developer.apple.com/documentation/swiftui/view/tabviewsearchactivation(_:))：
+选择搜索即激活输入，iOS 27 的系统搜索标签按自动激活配置获得独立显示。
+模拟器实图已确认四个导航标签共用左侧胶囊，右侧搜索为独立胶囊。
+保留系统布局、玻璃效果与搜索状态切换，不另绘底栏。
+TabView 处理回车提交，并将提交事件交给搜索页；来源“更多”页使用独立提交作用域，
+避免来源内搜索触发全局重新搜索。
+
+**验收修正**：跨生态筛选固定使用再漫画 ID，避免模拟器安装其他 Mihon 扩展后按前缀误选来源；
+仓库和影视源测试先按名称搜索，再定位原生懒加载列表中的目标行。
+网格尺寸的无障碍值表示实际比例（50–150%），XCTest 的归一化调整误把它当成 0–100%，
+改为按实际比例定位拇指并慢速拖动到端点／中心，最多三次修正实际手势位置，
+仍严格断言 50%、150%、100%，不修改产品比例。
+
+**安装排查**：新增 CopyManga 与 MH1234 的仓库安装／重启恢复回归。
+扩展失败提示增加可展开、可复制的“错误详情”，保留 JNI 已传回的完整异常链。
+CopyManga 1.4.85 与 MH1234 1.6.5 在 arm64 模拟器均完成仓库安装、初始化及重启恢复；
+MH1234 的 APK 和仓库 JAR 在 Mac JVM 中分别通过安装。
+
+**初始化失败根因**：最后一次独立 fixture UI 验证将 `JVMPreview` 应用安装到了用户的模拟器。
+该配置的 `platformClass` 为 `fixture.EmbeddedFixturePlatform`，只包含自有测试 ABI，
+不包含真实 Mihon 的 `ConfigurableSource` 等接口。真实 APK 转换成功后构造来源失败
+（`CONSTRUCTION_FAILED` → `NoClassDefFoundError: eu/kanade/tachiyomi/source/ConfigurableSource`），
+安装记录尚未持久化，因此列表仍显示需要安装。
+模拟器 `sources-fixture/extensions` 中用户失败的 CopyManga 1.4.85 与 MH1234 1.6.5 转换产物，
+不做任何修改即可在完整运行时安装成功；并已使用真实 CopyManga APK 重现 fixture 的上述异常。
+
+扩展管理复用原有配置识别逻辑，在 fixture 构建显示原因，禁用仓库和文件安装入口；
+安装模型同时拦截直接调用。运行 fixture 回归后必须恢复 `RealApiPreview` 应用，
+避免把测试 ABI 留给用户继续安装真实扩展。fixture 与真实扩展的数据目录继续隔离。
+
+**验证记录**：`codex-final-real` 中 CopyManga、MH1234 安装与重启两项通过；
+`codex-regressions` 中 Aniyomi 实际播放与跨生态筛选两项通过；
+`codex-fixture-final` 中扩展原生筛选与测试构建安装提示／禁用文件入口两项通过。
+`codex-product-final` 中 CMS 分页失败重试、分类筛选、播放／换集、单套控制栏与重启恢复通过；
+`codex-acceptance` 两项通过：浏览及作品库六种显示模式、网格 50%／150%／100%；
+单源顶部搜索、全局作品库与来源结果，以及“更多”保留查询。相关定向 UI 验收合计 9 项通过。
+这些日志及 `.xcresult` 位于 ignored `iosApp/build/`，安装与播放器截图已实际检查。
+
+## 104. 作品库分类排序与书架可见性
+
+作品库右上角增加“管理分类”：使用原生 List 拖拽手柄调整顺序，并为每个分类提供
+“在书架显示”开关。编辑仅修改本地快照，取消不写入；保存时在同一个共享 Room 事务中
+更新已有 `sort_key` 与 `show_in_lib` 字段，不增加数据库表或 Swift 持久化副本。
+如果编辑期间分类被添加或删除，拒绝过期快照，保留已有数据并提示重新打开管理页。
+
+书架分类胶囊只显示可见分类；隐藏当前分类后回到“全部”。隐藏不取消收藏，
+作品仍能在“全部”和整理分类中找到，管理页可重新开启显示。
+重命名、收藏成员关系与备份继续使用原有共享规则。
+
+共享分类与备份 8 项测试通过（`codex-category-native-regression`），覆盖排序与可见性重开、
+隐藏后收藏成员关系保持、无效／过期快照拒绝，以及导出后恢复至另一个数据库。
+`codex-category-acceptance` 的模拟器 UI 用例通过：
+创建两个分类、取消隐藏编辑不落库、拖拽交换顺序、保存隐藏、重启保持顺序与开关、重新显示。
+`codex-category-ui` 中原有分类创建／重启用例也通过。已检查管理页实际截图，
+`npm run docs:build` 通过；日志、`.xcresult` 与截图位于 ignored `iosApp/build/`。
+
+## 105. 来源使用排序与搜索清空恢复
+
+浏览显示菜单增加“最近使用”和“使用频率”。前者读取共享 `sources.used_at`，进入来源页或作品详情时更新；
+后者沿用 Android `POPULARITY` 的本地已保存作品数，不把重复进入同一作品累加成访问次数。
+使用计数通过一个聚合查询投影，时间与计数读取同一数据库快照；不增加 schema 或 Swift 数据副本。
+同值保留手动顺序，置顶分组继续优先，搜索／生态／内容类型筛选结果使用所选排序。
+首次使用没有保存设置的来源时，先保存当前有效顺序与开关，再记录使用时间，避免访问本身改变手动顺序。
+来源使用记录保留开关、置顶和手动位置，既有 Android 备份字段继续保存使用时间。
+
+全局搜索清空回归在旧实现稳定失败：取消了请求，但 `submitted` 和结果行没有重置，页面仍进入旧结果分支。
+现清空时同时重置已提交查询、结果、完成数与加载状态，恢复最近搜索；已取消任务不会继续启动排队请求，
+也不能用迟到结果覆盖后续搜索。最近搜索按钮仍可重新提交，并由“更多”携带查询进入单源搜索。
+
+共享分类／备份／来源 9 项原生测试通过（`codex-source-usage-native`）；模型探针覆盖清空、
+忽略取消的旧请求迟到、执行前取消三个场景，修复前失败、修复后通过。
+两个定向模拟器 UI 用例分别通过：`codex-source-sort-final` 验证首次访问不改变手动顺序、
+最近使用与作品数排序、重启保留排序偏好与使用时间、置顶优先和取消置顶后的顺序；
+`codex-source-usage-acceptance` 中的全局／单源搜索用例验证清空恢复最近搜索、重新提交及“更多”查询传递。
+后一个批次的来源排序用例曾因搜索激活时顶栏菜单隐藏而失败，修正测试操作后由前一个独立用例通过，
+不把旧批次整体计为通过。已检查三张来源排序与一张清空搜索截图；
+探针、日志、`.xcresult` 与截图位于 ignored `iosApp/build/`。
+本轮完成 §102 的来源使用排序；新来源版本提示尚未迁移。
+
+## 106. 浏览页新来源版本提示
+
+沿用共享 `sources.added_in` 字段，`IosLibrary.registerSourceCatalog` 在一次事务中只插入目录中缺失的来源，
+保留已存在来源的开关、置顶、手动位置、使用时间与加入版本。首次启用该功能时以现有目录建立基线（加入版本 0），
+随后新增的来源记录当前 iOS `CFBundleVersion`；旧来源不随升级重新标记。
+目录注册按浏览页原有生态顺序追加新位置，不增加表、schema、依赖或来源名单的 Swift 持久化副本。
+`sources.catalogVersion` 只记录基线已成功建立；空目录或扩展初始化失败不会完成基线。
+
+浏览列表与网格为当前构建新增来源显示“新”标记，并提供数量提示和“仅显示本版本新来源”开关。
+新来源筛选与搜索、成人开关、内容／生态筛选、来源启用状态组合；置顶、分组和排序继续作用于结果。
+开关随重启保留；没有符合条件的新来源时可通过空状态“显示全部”恢复。
+既有备份格式继续保存加入版本；应用版本与来源扩展自身版本分别沿用各自现有字段。
+
+共享分类／备份／来源 10 项原生测试通过（`codex-new-sources-native`），新增测试覆盖基线、新增／升级、
+重复刷新、非法输入无部分写入、保持原设置，以及数据库重开和备份恢复。
+`codex-new-sources-acceptance` 的定向 UI 用例通过，覆盖基线不标新、后续导入标记、数量与筛选、
+重启恢复、真实网格（以卡片宽度断言）及搜索空状态恢复全部来源；三张实际截图已检查。
+`codex-new-sources-ui` 中既有使用排序用例也单独通过；该旧批次的新来源用例因未搜索定位屏外站点而失败，
+后续验收补齐定位，并解除固定列表的启动参数，避免网格步骤被参数掩盖；不把旧批次整体计为通过。
+本轮完成 §102 尚未迁移的新来源提示；日志、`.xcresult` 与截图位于 ignored `iosApp/build/`。
+
+## 107. 设备端 DEX 转换提速、图片加载对齐 Android、内容类型切换与阅读器翻页
+
+**DEX 转换**：k-parsers-r（5.6 MB DEX，4266 类）在设备端转换需数分钟。剖析发现与解释器无关的算法热点：
+dex2jar 2.4.38 `RemoveLocalFromSSA.removeLoopFromPhi` 以工作队列反复把整个祖先集合并入子节点求传递闭包，
+巨型方法（数千 phi）呈立方级，JIT 下也占 88% 时间。它只需判断每个 phi 是否恰有一个非 phi 来源，
+`LinearRemoveLocalFromSSA` 用强连通分量 + 拓扑序 + 二元上限集合等价计算（迭代 Tarjan，避免解释器线程栈溢出）。
+`DexJarConverter` 改为直接驱动 `ExDex2Asm`（设置与原 `Dex2jar` 相同，仅替换该 pass），单 DEX 只解析一次
+（修复计划与翻译共用节点，原先解析两遍并复制一遍），类文件在内存交给 ZIP，帧回退直接返回 `java/lang/Object`
+（去掉逐类二次读写），按类分片最多 4 线程翻译（dex2jar transformer 无实例状态）。缓存版本升为 6。
+原版 dex2jar 输出本就不确定（两次转换 SHA 不同），故等价性在 IR 层验证：真实插件 17151 个方法（6561 含 phi）
+在三个调用点与原版结果逐一相同，变异实验可被夹具捕获；新旧产物在 parser-host 中 1370 / 95 个来源构造与描述摘要一致。
+
+| 指标 | 原版 | 现在 |
+|---|---|---|
+| k-parsers-r，Mac HotSpot `-Xint`（单线程，模拟设备解释器） | 800 s | 89 s |
+| k-parsers-r，模拟器 Zero 仓库安装（下载＋转换＋加载） | 超过 300 s 超时 | 106–108 s |
+| kototoro-parsers，模拟器安装 | — | 37–41 s |
+| UMA，模拟器安装 | — | 79–89 s |
+
+**图片加载对齐 Android**：iOS 原有三层 Android 没有的限制——JVM 侧封面/章节图片走按源互斥（同源并发 1，且与列表/详情互相排队）、
+封面全局并发 2、阅读页无并发上限也无预读。现在 Mihon/Aniyomi 的 `fetchImage`/`fetchCover` 在按源调用顺序之外执行
+（与 Android 直接并发调用扩展 client 一致；各自持有 lease，迟到回调语义不变，不等待被取消的控制调用），
+新增“图片挂起时列表/描述不排队”回归。Swift 侧 `RequestGate`（对应 `PriorityPermitPool`）：封面抓取 8、解码 3
+（Coil 设置）；阅读页按“阅读器线程数”（默认 3，1–10）并发，可见页优先于预读并可提升排队中的预读；
+预读沿用 Android 规则（当前可见页之后 10 页中最近的“预读页数”页，默认 6，1–20；离开窗口的排队预读取消），
+策略“页面预加载”（总是／仅 Wi-Fi（默认）／从不），省电与低数据模式下不预读。三项设置用 Android 相同键名，位于设置页“阅读器加载”。
+可见页下载在没有页面等待且非预读时取消，已完成下载保留供回到该页重新解码。
+
+**内容类型切换**：浏览、作品库与记录（历史／更新）顶部加入“全部／漫画／小说／视频”分段切换，仅当页面含两种以上内容类型时显示，
+已保存类型不存在时不生效。浏览页原“显示”菜单中的内容类型开关移除（仅剩一种可见类型的旧设置迁移为对应选择）；
+“按内容类型分组”只在“全部”时可选与生效，选中单一类型时按来源类型分组，回到“全部”恢复原选择。
+
+**阅读器**：
+- 更多面板：章节胶囊与“更多”按钮间距小于玻璃容器融合距离时两者被并成一个形状，面板看起来从章节按钮形变；
+  拉开间距、按来源控件设置缩放锚点并显式匹配几何过渡。
+- 左缘返回：隐藏导航栏后系统边缘返回手势不再触发。阅读器显示期间接管其委托（离开时还原），SwiftUI 再次关闭时用 KVO
+  重新打开，并让分页滚动与阅读手势等待边缘手势失败（非边缘起点会立即失败，不影响翻页）；不启用全宽内容返回。
+  去掉了多余的 `navigationBarBackButtonHidden`（导航栏已整体隐藏）。
+- 翻页动画：Android 的 cover / curl 规则原在 `core-ui`（仅 Android/JVM 目标），iOS 无法使用。现下沉到
+  `reader-core/PageTurnTransition`（样式、逐页变换、cover 固定页、卷页几何），`core-ui` 的
+  `ScenePageTransition`/`ScenePageTransform` 改为类型别名并委托，Android 相关单测 17＋24 项与 reader-core 187 项通过。
+  iOS 选择“高级／仿真”时改用自驱动分页器 `ReaderTurnPager`（与 scene host 一样自己持有位移，拖动/点击驱动阅读顺序位置，
+  `Animatable` 逐帧调用 `IosReader.pageTurn`）：卷页按折线裁出正面、镜像背面并加白层与阴影，被揭开页加暗；
+  每页有不透明阅读背景（下一页固定在下方，信箱留白不能透出）。拖动用 `simultaneousGesture`：作为普通手势时要等
+  页面自身的双击／缩放手势在抬手时失败，拖动事件会积压到松手才一次性交付；页面放大时拖动交给页面平移。
+  不依赖 Metal 工具链（本机 Xcode 未装该组件，也避免给所有构建引入依赖）。原有“淡入淡出／缩放”保留，取值不变
+  （高级＝4、仿真＝5）。模拟器上按住拖动期间由宿主机截图，确认从左到右／从右到左卷页与叠加效果。
+- 阅读模式改用 Android 名称：默认（从左到右）、从右到左、从上到下、条漫、横向条漫（连续）；新设置默认从左到右分页。
+
+**放大采样（SSIV）现状**：基础图按 `ImageDecodeSize` 4MP／16384 采样解码；超过阈值的长图在分页相机与连续模式按可见区域
+分块叠加，块采样率随缩放变化。实测 ImageIO 对 JPEG 为真正区域解码（单块 24 ms，对比整图 349 ms），
+PNG 每块仍解整张（约 80 ms，与位置无关）。连续（条漫）模式没有双指缩放；PNG 分块缓存与条漫缩放待做（条漫缩放已于 §111 完成）。
+
+**仓库页**：页面导航取消的目录刷新／导入请求（-999）曾显示为错误“已取消”，使 UMA 安装看似失败；取消类错误不再展示。
+
+**边界**：数据为 Apple Silicon 模拟器与 Mac 解释器；真机 Zero 的转换时间、内存与多线程收益需真机验证。
+卷页的手指高度只影响折线倾角，点击翻页从中部翻起。
+
+## 108. iOS 内容空间、就地搜索、继续阅读与作品卡片
+
+**内容空间**：对应 Android 的 Space（先内置漫画／小说／视频）。浏览、作品库与记录的右上角为同一个空间菜单
+（`space.kind`，跨页共享、重启保留），页面标题下用 `navigationSubtitle` 标出当前空间；空间里没有内容时给出
+“显示全部”。设置页“内容空间”可关闭（`space.enabled`），关闭后各页恢复 §107 的顶部分段切换（各自保存）。
+“按内容类型分组”只在未限定类型时可用。
+
+**搜索**：三个页面都在顶栏提供就地搜索按钮（`searchToolbarBehavior(.minimize)`）：作品库搜收藏、记录搜历史／更新、
+浏览搜来源。全局搜索保留为系统搜索标签（Apple 推荐的应用级搜索位置），浏览页另有带地球的“搜索全部来源”按钮跳转。
+浏览页工具栏项目较多，“仓库与扩展”移到左侧，避免页内搜索按钮被挤出。
+
+**继续阅读**：Android 底栏的继续阅读按钮放在系统的标签栏附件位（`tabViewBottomAccessory`，iOS 26.1 起无记录时隐藏），
+显示最近作品的封面、标题与进度，点按以全屏打开详情并直接续读当前章节；返回后可关闭。
+
+**作品库分类**：分类胶囊改为 `safeAreaBar` 悬浮在内容上方，滚动时保持可用。
+
+**作品卡片**（SwiftUI 原生绘制，参考 Android `ContentCardRenderModel` / `TabletPosterCover`）：
+发丝描边、柔和阴影、书本封面的书脊阴影；角标选用新章节数（右上红色计数）、已读完（右上对勾）、已收藏与已下载
+（左上圆形标记，作品库内不重复标收藏）、成人内容（右下 18+）；列表行改为 Android 式状态行（新章节胶囊＋已读／已收藏／已下载文字）。
+标记由 `ContentCollection` 从作品库（收藏、更新）与下载队列统一推导，所有列表一致。
+
+**验证**：真实扩展预览上空间开启／关闭两种模式、继续阅读附件续读与关闭、JAR 漫画阅读与真实 APK 阅读用例通过；
+UI 测试统一用 `pageSearchField()` 展开页内搜索按钮。
+
+## 109. iOS 原生 Space 切换面板与空间续读
+
+§108 最初只有右上角 Picker 菜单，与 Android 的 `SpaceSidekickPanel` 不等价。
+现同一入口打开 SwiftUI 原生 sheet，提供“全部”与漫画／小说／视频卡片，显示当前选择、
+已启用来源数和收藏数。点击卡片切换后关闭面板；完成按钮与系统下滑手势可直接关闭，保持原选择。
+继续沿用 `space.kind`／`space.enabled`：浏览、作品库和记录共用选择，重启保留；关闭空间仍恢复各页分段切换。
+
+每个媒体空间从共享历史中选取该类型的最近作品，显示封面、标题与进度；无历史显示“暂无阅读记录”。
+续读先切到该空间，等 sheet 完成关闭后再打开阅读器或播放器，避免两层模态展示冲突。
+面板与底栏附件共用 `ContinueReadingPresentation` 和既有 `SourceDetailsView(autoResume: true)`，
+复用章节／进度恢复与下载环境，不建立独立历史存储、导航协议或数据库表。
+
+此次对齐空间卡片、选择与各空间续读；Android 的自定义空间、侧边拖拽入口及独立空间导航栈未迁移。
+
+同时修复连续切换显示模式后的卡片长按菜单回归：卡片交互按作品 ID＋显示模式设置唯一身份，
+切换布局时重建菜单交互；不能只用显示模式作身份，否则同一网格内的卡片会重复标识。
+测试辅助方法识别系统折叠的标签栏，先展开再选择标签，并只用真正的 BackButton 返回，避免点击顶栏业务按钮。
+全局搜索激活期间系统隐藏顶栏，入口用例改为断言应用级搜索框与键盘。
+
+**验证**：真实扩展模拟器预览编译通过，四个定向 UI 用例分别通过：
+`testContentSpacesAndPerPageSwitch`（`codex-space-panel`）、
+`testContinueReadingAccessoryResumes`（`codex-space-regression`，包含空间卡片续读）、
+`testBrowseToolbarOpensGlobalSearch`（`codex-space-context-probe`）、
+`testDisplayModesInBrowseAndLibrary`（`codex-space-display-verified`，含六种布局、网格尺寸和长按操作）。
+前两个批次包含已修正测试脚本的失败记录，不把整个旧批次计为通过。
+Space 面板及长按操作截图已检查；临时诊断用例已移除，保留原完整回归。
+日志、`.xcresult` 和截图在 ignored `iosApp/build/`，此次未进行真机验收。
+
+## 110. iOS 视频外挂字幕
+
+Aniyomi 的 `Video.subtitleTracks` 已经由 source-host 写入 `SourcePage.externalSubtitleTracks`，但 iOS 播放器只使用流内的
+HLS/内嵌字幕。AVPlayer 不能把独立字幕文件加入 HLS 或渐进式资源，因此改为文本叠加层：
+
+- `ios-shared/IosSubtitles` 解析 WebVTT、SubRip 和 ASS/SSA（去除样式/定位标签，跳过 VTT 的 NOTE/STYLE/REGION 块，
+  按 ASS `[Events]` 的 Format 字段顺序解析，正文中的逗号保留；重叠 cue 同时显示）。按开始时间二分查找当前文本；
+  `IosSourcePage.subtitles` 取代原来未使用的 `subtitleUrls`，并携带语言标签和请求头。
+- 播放器用流的请求头加轨道自身的请求头下载字幕文件，依次尝试 UTF-16（带 BOM）、UTF-8、GB 18030 解码。
+  字幕叠加层位于控件渐变之上，不拦截触摸；控件显示时上移，避免遮挡进度条。cue 时间观察器每 0.1 秒运行一次，
+  只有文本变化时才发布。
+- 字幕菜单把关闭、内嵌和外挂字幕合并成一个选择：选择外挂字幕时取消内嵌字幕，反之亦然。如果流已经默认开启内嵌字幕，
+  就保留内嵌字幕；否则依次选择本次会话上一次选择的语言、用户偏好语言和第一条外挂字幕。主动关闭后，切换线路或剧集
+  也不会重新开启。下载或解析失败时，该项标为“加载失败”，不影响播放。
+
+**未做**：外挂音轨（`externalAudioTracks`）需要与视频同步的第二路音频，HLS 无法用 `AVMutableComposition` 合成，
+仍未接入；画中画中不显示叠加字幕。
+
+**验证**：`IosSubtitlesTest` 4 项（模拟器 `iosSimulatorArm64Test`）通过。默认构建下运行 CMS 夹具的
+`testAppleCmsSourceImportsBrowsesAndPlaysNatively`，并临时注入一条夹具 VTT 字幕：在真实 HLS 播放中断言叠加文本，
+截图已检查（暗色渐变问题已修正后复验）；注入代码和断言已移除。真实 Aniyomi 源的外挂字幕尚未做端到端验收。
+
+## 111. iOS 条漫双指缩放
+
+§107 记录了连续（条漫）模式不支持双指缩放。Android 的 webtoon 缩放框会放大整条长图，iOS 现已对齐，
+但没有采用对整个 ScrollView 做 `scaleEffect` 的方案：那样章节开头会被推出可视区，图片清晰度也不会随缩放提高。
+现在的做法是按缩放后的宽度重新排版：
+
+- `IosReader.setZoom` 只作用于连续模式：`VerticalReaderScene` 以“视口宽度 × 缩放倍数”的列宽排版
+  （横向条漫则放大高度），范围是 1–4 倍。`progress` 返回的页内偏移和 `scrollOrigin` 接收的偏移都换算成未缩放像素，
+  因此历史进度和书签与缩放无关。分页模式忽略此值。
+- 条漫的 ScrollView 改为纵横双向滚动（横向按内容尺寸回弹）。缩放后，页面瓦片按实际显示尺寸取视口和采样率，
+  `visibleTiles` 仍使用屏幕视口，超长页的分块会随缩放提高清晰度。
+- 捏合时先用 `scaleEffect` 绕起点预览，松手后提交新的排版，并把捏合起点下的内容滚回原处；双击在 1× 和 2× 之间切换，
+  也提供 VoiceOver 动作。翻页点击区、自动滚动和跨章节导航沿用原逻辑，跨章节时保留横向平移位置。
+  缩放只在本次会话有效，切换阅读模式后恢复适应宽度（与 Android 一致，不持久化）。
+
+**未做**：横向条漫（模式 4）的交互缩放（共享层已支持，Swift 尚未启用，需要处理从右到左的偏移镜像）；
+非分块图片在 4× 时仍受 4 MP 解码上限限制，会有一定的放大模糊。
+
+**验证**：`IosProductTest.readerCoreOwnsSpreadGeometryAndContinuousProgress` 新增断言，验证缩放后的排版、进度归一化与上限，
+共享测试 8 项通过。真实扩展预览新增 `testWebtoonStripPinchZoomPansAndResets`（再漫画《大理寺日志》）：
+页面宽度从 1× 放大到 4×、可横向平移、双击还原。首次运行在捏合前失败，用临时日志确认手势和提交链路正常，
+随后连续两次通过；测试已在切换模式后等待布局稳定。放大、平移和还原的截图已检查，未做真机验收。
+同时修正了上一轮 `testContinueReadingAccessoryResumes` 新增的断言：模拟器上已有小说阅读记录，所以小说空间的底栏附件可以合法地显示小说。现在改为断言附件不再显示刚读的漫画，并加 `defer`，确保中途失败时空间也恢复为“全部”（此前一次中途失败把 `space.kind=NOVEL` 留在设备上，导致后续用例找不到漫画源）。两个用例随后在同一批次中通过。
+
+## 112. iOS 小说章节下载与离线阅读
+
+`IosDownloadArchive` 现在接受漫画和小说章节（视频仍拒绝），并新增 `IosChapterTextArchive`：
+`IosChapterText` 直接包装共享的 `SourceChapterContent`，HTML、图片列表和每张图片的请求头一起序列化。
+下载复用原有的串行队列、暂停和重试：小说章节先保存 `text.json`，再按来源要求的请求头逐张下载插图
+（ImageIO 校验，单张 32 MB 上限），每完成一项就是一个检查点，全部完成后写入 `novel.json`
+（原 URL 到本地文件的映射）。队列状态对小说不显示“页”。阅读时优先读离线副本，插图走本地文件，
+标题下显示“已下载 · 离线阅读”；离线副本损坏时回退到在线。阅读器工具栏提供“下载本章／后续 10 章／全部未下载章节”
+和下载队列入口，目录中已下载的章节有标记，左滑可单章下载。
+
+修正：底栏继续阅读附件在阅读器内仍然可见，会遮挡小说正文，测试中也会误触。现在由 `ReaderPresence`
+在阅读器显示期间关闭附件（iOS 26.1+）；附件打开的全屏展示也上移到 TabView，避免附件隐藏时连带关闭阅读器。
+
+**验证**：共享测试新增 2 项（小说可下载、视频拒绝；离线章节存档往返）；真实扩展预览新增
+`testTsundokuNovelChapterDownloadsAndReadsOffline`、`testJarNovelChapterDownloadsAndReadsOffline`（BILINOVEL），
+两项均通过，并验证附件在阅读器中不可点击；`testContinueReadingAccessoryResumes` 回归通过。
+首轮失败原因是工具栏 `Menu` 不带 accessibilityIdentifier，以及测试点到了附件，已改为按标题查找并在点击前避开附件。
+
+## 113. iOS 主界面搜索、作品库顶栏与继续阅读附件修正
+
+- **页内搜索无法关闭**：在这个 TabView 中，系统的 `searchToolbarBehavior(.minimize)` 搜索的关闭按钮只会收起键盘，
+  随后输入框重新获得焦点，`isPresented` 也不会变为 false（日志确认；移走 TabView 的 searchable 或
+  `tabViewSearchActivation` 均无效）。作品库、浏览和记录改用自有的 `pageSearch`：工具栏按钮打开顶部紧凑输入框，
+  “取消”关闭并清空；提交后收成“🔍 关键词 ✕”胶囊，点击可再次编辑，✕ 一键清除，只占一行。
+- **作品库顶部模糊、不可点**：分类条是 `safeAreaBar` 里的横向 ScrollView，导航栏把它当成页面的滚动视图，
+  于是大标题一直模糊、分类胶囊被边缘效果淡出。对照实验（去掉 ScrollView 后标题清晰）确认了原因，
+  分类条已移到页面内容顶部。
+- **附件封面不显示**：根因是 `IosSources.cover` 用完整 `SourceRef` 校验来源，而作品库恢复的作品带的是数据库里的
+  locale 或 contentType，与运行时不一致，校验因 `Cover identity mismatch` 失败。现改为按来源名校验，并新增共享测试。
+  另外，系统托管的附件不会执行视图 task，也不跟随环境值更新，因此封面由 TabView 加载后通过 `@Observable` 传入。
+- **附件显示已读章节**：`ChaptersDao.findByIds` 批量查出历史记录对应的章节，`SourceLibraryEntry.lastChapter`
+  提供章节名；附件显示“继续阅读 · 第 12 话 · 35%”。
+
+**验证**：新增 `testRootPageSearchClosesAndShowsKeyword`（三个页面），以及作品库、附件截图检查；
+空间、显示模式、全局搜索入口、继续阅读、作品库持久化等回归通过。
+
+## 114. 来源设置、User-Agent 预设与 Cloudflare 验证
+
+**来源设置**：浏览页工具栏的筛选按钮与分类条中的筛选胶囊重复，已改为“来源设置”。设置页按运行时声明渲染：
+- JAR 解析器：`ConfigKey`，包括域名（含预设）、User-Agent、拦截 Cloudflare 等；
+- Mihon/Tsundoku/Aniyomi：扩展自身的设置，加上宿主的 User-Agent 行；
+- 苹果 CMS：API 地址和 User-Agent，写入站点 `site.api` 和 `site.headers`，保存后清空运行时缓存
+  （`IosVideoSources.settings/updateSettings`）。
+
+所有 User-Agent 行都提供 7 个常用预设（iPhone/iPad Safari、Android Chrome、Windows Chrome/Edge/Firefox、
+macOS Safari）以及“恢复来源默认值”。Mihon 扩展的域名与 Android 一致，依赖扩展自己的镜像设置；
+宿主层通用的域名改写尚未实现。
+
+**Cloudflare**：此前协议对所有来源失败一律返回 `Source operation failed`，界面无法区分。本次协议新增以下内容
+（均向后兼容）：
+- 错误码 `CHALLENGE_REQUIRED`，`SourceError.url` 只携带站点 origin；`SourceChallengeException`
+  沿 cause 链识别；`SourceEndpoint` 可以注入宿主识别器；
+- `browserSession`：返回站点地址和运行时请求实际使用的 User-Agent（Cloudflare 的 clearance 与 UA 绑定）；
+- `importCookies`：把浏览器 Cookie 写回来源请求所用的 cookie jar。
+
+宿主端由 `HostChallenges` 识别解析器的 `CloudFlareProtectedException`，以及 Suwayomi 拦截器在未配置 FlareSolverr
+时抛出的 “Cloudflare bypass currently disabled”；`HostBrowser` 通过反射写入扩展 OkHttp 客户端的 cookieJar，
+解析器使用平台 cookieJar（iOS 上与 Mihon 共用同一个）。
+
+iOS 端，`IosSourceErrors` 把协议错误码转成中文说明；浏览页、详情页、漫画和小说阅读器遇到验证时显示
+“在浏览器中验证”，打开内置 WKWebView（使用运行时的 UA）。页面检测到 `cf_clearance` 后提示已通过，
+点“完成”把该站点的 Cookie 写回运行时并自动重试。设置页也可以直接用内置浏览器打开站点。
+
+**未做**：CMS 原生请求的 Cloudflare 识别；没有走 Cloudflare 拦截器的 Mihon 普通 client 返回的 403
+（无法与一般 403 区分）；自动（无界面）求解。iOS 上没有 Android 的 WebView 拦截器，后续可以用离屏 WKWebView
+加载挑战页并等待 `cf_clearance`，相当于 Mihon 的自动求解，但需要宿主在请求失败时回调 Swift。
+
+**验证**：core-source 协议测试新增 2 项（challenge 只带 origin、cause 链与识别器；browserSession/importCookies 往返）；
+source-host `HostBrowserTest` 3 项（真实 OkHttp cookieJar 写入、两类异常识别、普通 403 不误判）；
+ios-shared 新增 3 项（CMS 设置改地址和 UA 并真正生效、challenge 错误投影与 Cookie 回写、恢复作品的封面校验）。
+真实扩展预览新增 `testSourceSettingsUserAgentPresetsAndBrowser`（再漫画 Mihon、MangaDex JAR），流程为：
+从浏览页工具栏进入设置，User-Agent 选择 Windows Chrome 预设并保存，恢复默认后显示“默认”，用内置浏览器打开站点；该用例通过。
+MangaDex 的设置页显示域名预设和首选图片服务器。真实 Cloudflare 站点的端到端验证尚未进行。
+预览的 JVM 资源目录只替换了 core-source/source-host/parser-host 三个 JAR，没有重新转换 APK。
+
+同批回归：作品库持久化 2 项，空间、显示模式、全局搜索入口和继续阅读 4 项，仓库管理 2 项，
+产品流程 5 项（其中 3 项在首轮因仓库夹具未启动失败，启动夹具后通过），全部通过。
+`ProductFlowTests.testCmsFavouritesHistoryAndPlaybackResume` 仍然失败：导入站点后，`importVideoSite`
+没有回到浏览页就查找来源行。该用例与辅助函数在本次之前已被改写（未提交），这次没有改动导入流程，原因尚未确认。
+
+
+## 115. 全来源筛选入口、外部备份导入、备份补节、本地导入、扩展域名与自动 Cloudflare 验证
+
+**筛选入口**：浏览页的“筛选”按钮对所有来源都显示。Tsundoku 等没有 FilterList、也不支持“最新”的来源，
+筛选面板会显示唯一的排序方式，并说明来源没有提供筛选条件；面板读取失败时显示原因，并可重试（`FilterPanelPlaceholder`）。
+
+**外部备份**：Android `ExternalBackupRepository` 的写库逻辑迁入 core-backup commonMain，作为 `ExternalLibraryImport`。
+平台通过三个注入点接入：`ExternalSourceCatalog` 提供已安装来源，`ExternalImportTransaction` 提供事务，
+NSFW 判定由回调提供。`BulkImportEntry`、分类映射、ExHentai fork 映射、Venera 来源表和 ID 公式都保持原样；
+`AdultTagKeywords` 随之迁入 core-backup，包名不变。Venera 的解析规则迁为 `VeneraBackupDecoding`，
+平台只负责实现 `VeneraDatabase` 的 SQLite 查询：Android 用 Cursor，iOS 用 bundled SQLite。
+Android 的 `ExternalBackupRepository` 和 `ExternalBackupDecoder` 改为委托共享实现。
+
+iOS 的“从文件恢复”自动识别备份类型：带 `index` 的 ZIP 走 Kototoro 恢复，其他 ZIP 按 Venera 处理，其余文件按
+`.tachibk` 处理（含 anime 字段的视为 Aniyomi，否则视为 Mihon）。导入完成后报告：未安装的扩展（作品已导入，
+保留原有标识）、Venera 中找不到对应来源而未导入的作品。备份 ZIP 读取器新增宽松模式，可以读取 Venera 的嵌套目录。
+
+**Kototoro 备份补节**：`LibraryBackup` 新增 `source_origins`、`extension_repos`、`tracks` 和 `track_logs` 四节的导出、
+恢复与计数。更新检测的合并规则（`mergeWithRestored`、`mergeRestoredTrack/TrackLog`）从 Android
+`BackupRepository` 迁入 core-domain，两端共用。iOS 预览中“跳过”的节只剩 settings、reader_grid、scrobbling、
+saved_filters、auth。
+
+**本地导入**：新增 KMP 模块 `core-local`，内容如下：
+- `LocalBookReader`：用 okio `openZip` 读取以下格式。
+  - CBZ/ZIP：可读 Kototoro 写出的 `index.json`，按 entries 规则 `%08d_%04d\d{4}` 分配各章页面；
+    没有索引时，按目录分章并按自然序排列。
+  - EPUB：解析 container、OPF、spine，目录取自 nav 或 NCX。
+  - TXT：UTF-8 优先，其他编码交给平台解码器（iOS 用 Foundation 依次尝试 GB18030、Big5）；
+    按“第N章”等标题分章，没有标题时按约 8000 字切分。
+- `LocalSourceRuntime`：以 Android 的来源名 `LOCAL` 和 `LOCAL_NOVEL` 实现 `SourceRuntime`。
+  - 图片以 `<sha256>.img` 写入阅读器的图片目录；EPUB 插图写入作品目录，并以 file URL 引用。
+  - 同名、同大小的文件重复导入时，替换旧的副本。
+
+iOS 端经 `RoutedSourceRuntime` 路由本地源，并在浏览页显示“本地作品”分组（本地漫画、本地小说）。
+本地源的浏览页，工具栏是“+ 导入文件”（可多选），作品卡片上有“删除文件”菜单，阅读器中隐藏下载入口。
+Info.plist 声明了 cbz/zip/epub/txt 文档类型，“用 Kototoro 打开”会直接导入。
+收藏、历史和继续阅读都沿用通用流程。
+
+**扩展域名**：Mihon/Tsundoku/Aniyomi 的 HTTP 来源设置里，在 User-Agent 行之外新增宿主的“域名”行（`HostDomain`）。
+- 设置值存于 `source_<id>` 的 `domain_override`，只替换主机和端口，保留原地址的路径。
+- 扩展的 `baseUrl` 字段如果存在（含 R8 改名的字段，以值等于 `getBaseUrl()` 定位，并写入探测值确认 getter 生效），
+  直接替换该字段。
+- 发布版扩展常被 R8 把 `getBaseUrl()` 内联为常量，例如再漫画 keiyoushi 版。对这类扩展，iOS 平台在 NetworkHelper
+  的 `client`、`cloudflareClient` 最前面安装 `DomainRewriteInterceptor`，按 `HostDomainRewrites` 的映射把原主机的
+  请求、Referer 和 Origin 改到新域名。平台没有安装拦截器、扩展也没有可替换字段时，该行显示为不可用。
+- 文本设置（域名等）的编辑页也提供“恢复来源默认值”。
+
+**自动 Cloudflare 验证**：`ChallengeSolver` 对应 Mihon 的自动求解。遇到验证时，先用窗口内不可见、不可交互的
+WKWebView（使用来源的 UA）加载站点，最多等待 20 秒；拿到 `cf_clearance` 后把 Cookie 写回运行时并自动重试。
+同一站点 2 分钟内只尝试一次，自动验证失败时才显示“在浏览器中验证”。浏览页、详情页和两个阅读器共用
+`ChallengeVerifyButton`。需要点击的交互式挑战无法自动通过。
+
+**测试修复**：`testFilterPanelsAcrossEcosystems` 在第二轮误用了状态恢复后保留的全局搜索框，`pageSearchField`
+改为优先使用页面自己的入口。`testCmsFavouritesHistoryAndPlaybackResume` 有两处问题：来源列表过长，导入的站点
+没有渲染出来，改为先搜索；另外其他用例收藏了同名的“测试动画”，改为匹配带进度的卡片。这两处都是测试问题，不是产品缺陷。
+
+**验证**：
+- core-local jvmTest 7 项（Kototoro 索引 CBZ、目录 ZIP、EPUB 目录与插图、GB18030 TXT、无标题切分、列表/搜索/重导入/删除、
+  错误文件不残留）；
+- ios-shared 共 42 项全部通过，其中新增：
+  - `IosExternalBackupTest` 5 项：Android ID 公式在 Kotlin/Native 上一致，Mihon gzip 备份含分类、历史、未安装扩展，
+    Aniyomi 识别，Venera SQLite 来源匹配，未知文件被拒绝；
+  - `IosBackupTest` 中四个新节的往返测试；
+  - `IosLocalImportTest`；
+- source-host 102 项；mihon-ios-compat 新增 `DomainRewriteInterceptorTest` 2 项；
+- core-backup、core-domain、core-library 的 jvmTest 和 Android `:app:compileDebugKotlin` 及备份相关单测通过；
+- UI 测试（真实扩展预览）通过：
+  - `testFilterPanelsAcrossEcosystems`、`testCmsFavouritesHistoryAndPlaybackResume`；
+  - `BackupFlowTests` 2 项，含通过系统文件选择器导入 Mihon 备份；
+  - `LocalImportTests` 2 项：CBZ 在阅读器中显示，GB18030 TXT 分章阅读；
+  - `testSourceSettingsUserAgentPresetsAndBrowser`：Mihon 来源设置域名后显示新值，恢复默认；
+- 默认（无 JVM）构建通过。
+
+选择器夹具由 `iosApp/Scripts/stage-picker-fixtures.py <simulator id>` 放入模拟器的“我的 iPhone”。
+
+**仍未覆盖**：
+- 真实 Cloudflare 站点的端到端测试（自动和手动两条路径）；
+- CMS 原生请求的 Cloudflare 识别；
+- Mihon 域名改写对真实镜像站的联网验证（单测只验证了请求改写）；
+- 本地导入暂不支持视频文件和 PDF/CBR/7z；
+- 同步（按要求暂缓）。

@@ -31,6 +31,23 @@ class MihonJarInspectorTest {
     }
 
     @Test
+    fun `manga manifests without a library marker read it from the version name`() {
+        // Third-party repositories (e.g. CopyManga forks) ship APKs with only the extension class and nsfw keys.
+        val fixtures = JarFixture(directory)
+        val inferred = MihonJarInspector().inspect(fixtures.sourceJar(
+            name = "MangaB", metadata = JarFixture.manifest(entry = ".MangaB", versionName = "1.4.85", libraryMarker = false),
+        ))
+        assertEquals(SourceEcosystem.MIHON, inferred.ecosystem)
+        assertEquals("1.4", inferred.extensionLib)
+        val unsupported = assertThrows(SourceJarException::class.java) {
+            MihonJarInspector().inspect(fixtures.sourceJar(
+                name = "MangaC", metadata = JarFixture.manifest(entry = ".MangaC", versionName = "1.3.2", libraryMarker = false),
+            ))
+        }
+        assertEquals(SourceJarFailure.UNSUPPORTED_LIBRARY, unsupported.failure)
+    }
+
+    @Test
     fun `novel manifests are classified as Tsundoku with their own keys and inferred library`() {
         val fixtures = JarFixture(directory)
         val explicit = MihonJarInspector().inspect(fixtures.sourceJar(name = "NovelA", packageName = "fixture.novel", metadata = JarFixture.novelManifest()))

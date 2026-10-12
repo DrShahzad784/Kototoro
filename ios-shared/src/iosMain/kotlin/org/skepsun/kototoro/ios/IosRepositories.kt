@@ -13,6 +13,8 @@ class IosExtension internal constructor(internal val value: ExtensionStoreIndex.
     val url: String get() = value.resources.jarUrl.ifBlank { value.resources.apkUrl }
     val languages: List<String> get() = value.sources.map { it.language }.distinct()
     val isAdult: Boolean get() = value.contentWarning == ExtensionStoreIndex.ContentWarning.NSFW
+    val sourceNames: List<String> get() = value.sources.map { it.name }
+    val iconUrl: String get() = value.resources.iconUrl
 }
 class IosRepositoryCatalog internal constructor(
     val url: String, val kind: String, val title: String, val signingKey: String,
@@ -24,16 +26,20 @@ class IosRepositoryCatalog internal constructor(
 
 /** Shared decoders and existing repository table; Swift supplies URL loading and SHA-256. */
 class IosRepositories(private val library: IosLibrary) {
+    /** Repositories saved before names were derived like Android's show "owner/repo" instead of the folder name. */
     @Throws(Exception::class)
     suspend fun saved(): List<IosRepository> = library.database.getExternalExtensionRepoDao().getAll()
-        .filter { it.type.name in supported }.map { IosRepository(it.type.name, it.baseUrl, it.name, it.signingKeyFingerprint) }
+        .filter { it.type.name in supported }.map {
+            val title = if (it.name.isBlank() || it.name == "repo") repositoryName(it.baseUrl) else it.name
+            IosRepository(it.type.name, it.baseUrl, title, it.signingKeyFingerprint)
+        }
 
     @Throws(Exception::class)
     fun decode(bytes: ByteArray, protobuf: Boolean, url: String, kind: String): IosRepositoryCatalog {
         require(kind in supported)
         val payload = gunzipExtensionStoreBytes(bytes)
         val legacy = !protobuf && payload.decodeToString().trimStart().startsWith("[")
-        val index = if (legacy) decodeLegacyExtensionIndex(payload, url.substringBeforeLast('/').substringAfterLast('/'))
+        val index = if (legacy) decodeLegacyExtensionIndex(payload, repositoryName(url))
             else decodeExtensionStoreIndex(payload, protobuf)
         require(index.name.isNotBlank())
         return IosRepositoryCatalog(url, kind, index.name, index.signingKey, index.extensionListUrl,
@@ -100,5 +106,25 @@ class IosRepositories(private val library: IosLibrary) {
         library.database.getExternalExtensionRepoDao().delete(ExternalExtensionType.valueOf(repository.kind), repository.url)
     }
 
-    companion object { private val supported = setOf("MIHON", "ANIYOMI", "TSUNDOKU", "JAR") }
+    internal companion object {
+        private val supported = setOf("MIHON", "ANIYOMI", "TSUNDOKU", "JAR")
+
+        /**
+         * Android's `deriveRepoName`: GitHub-hosted indexes (raw.githubusercontent.com / github.com) are named
+         * "owner/repo", since their index usually sits in a branch or folder called `repo`; otherwise the index's
+         * folder, then the host.
+         */
+        internal fun repositoryName(url: String): String {
+            val host = url.substringAfter("://", "").substringBefore('/').substringBefore('?').lowercase()
+            val segments = url.substringAfter("://", "").substringAfter('/', "").substringBefore('?').substringBefore('#')
+                .split('/').filter(String::isNotEmpty)
+            return when {
+                segments.size >= 2 && (host.endsWith("githubusercontent.com") || host == "github.com") ->
+                    "${segments[0]}/${segments[1]}"
+                segments.size >= 2 -> segments[segments.size - 2]
+                segments.isNotEmpty() && !segments.last().contains('.') -> segments.last()
+                else -> host
+            }
+        }
+    }
 }

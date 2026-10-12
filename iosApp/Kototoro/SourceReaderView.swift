@@ -11,6 +11,8 @@ final class SourceReaderModel: ObservableObject {
     @Published private(set) var images: [Int: UIImage] = [:]
     @Published private(set) var artifacts: [Int: ReaderImageArtifact] = [:]
     @Published private(set) var error: String?
+    /// The last failure was a browser challenge (Cloudflare): the error offers the in-app browser.
+    @Published private(set) var challenge: IosChallenge?
     @Published private(set) var isLoadingPages = false
     @Published private(set) var bookmarks: [IosBookmark] = []
     @Published private(set) var slots: [IosReaderSlot] = []
@@ -18,12 +20,33 @@ final class SourceReaderModel: ObservableObject {
     @Published private(set) var pageRevision = 0
     @Published var slotIndex: Int = 0
     @Published var autoScroll = false
+    /// A page magnified past its fit: drags pan it rather than turning the page.
+    var isPageZoomed = false
+    /// The vertical strip's zoom (Android's webtoon scaling frame): the strip is laid out wider rather than magnified,
+    /// so pages decode and tile at the size shown. Session-only, back to fit when the reading mode changes.
+    @Published private(set) var stripZoom: CGFloat = 1
     let runtime: IosSources
     let content: IosSourceContent
     let engine = IosReader()
     var library: IosLibrary?
     private var request: UUID?
     private var loading: Set<Int> = []
+    /// One download per page of this chapter, shared by the page on screen and the prefetcher (Android's
+    /// `PageLoader` tasks). Finished downloads stay: the artifact on disk is decoded again when the page returns.
+    private var fetches: [Int: PageFetch] = [:]
+    /// Android's reader threads: pages downloading at the same time, the page on screen before prefetches.
+    private let pageGate = RequestGate(limit: ReaderLoading.threads)
+
+    private final class PageFetch {
+        let task: Task<IosSourceImage, Error>
+        let ticket: Int
+        let isPrefetch: Bool
+        var consumers = 0
+        var finished = false
+        init(task: Task<IosSourceImage, Error>, ticket: Int, isPrefetch: Bool) {
+            self.task = task; self.ticket = ticket; self.isPrefetch = isPrefetch
+        }
+    }
     private var viewport = CGSize(width: 1, height: 1)
     private var preferences = ReaderPreferences()
     private var offset: Float = 0
@@ -44,6 +67,7 @@ final class SourceReaderModel: ObservableObject {
     func configure(size: CGSize, preferences: ReaderPreferences) {
         guard size.width > 1 && size.height > 1 else { return }
         let cropChanged = loaded && self.preferences.cropMargins != preferences.cropMargins
+        if preferences.mode != self.preferences.mode || preferences.mode != 3 { stripZoom = 1; engine.setZoom(zoom: 1) }
         viewport = size; self.preferences = preferences
         engine.configure(count: Int32(pages.count), width: Int32(size.width), height: Int32(size.height),
                          mode: Int32(preferences.mode), doublePage: preferences.doublePage,
@@ -61,11 +85,13 @@ final class SourceReaderModel: ObservableObject {
         }
     }
 
+    private var startAtEnd = false
+
     func load() async {
         guard !loaded else { return }
         let token = UUID(); request = token
         let selected = chapter
-        isLoadingPages = true; error = nil
+        isLoadingPages = true; error = nil; challenge = nil
         defer { if request == token { isLoadingPages = false } }
         do {
             let result = try await ReaderDownloads.pages(runtime: runtime, content: content, chapter: selected)
@@ -77,27 +103,39 @@ final class SourceReaderModel: ObservableObject {
             if let savedPosition, savedPosition.chapterId == selected.id {
                 index = min(max(0, Int(savedPosition.index)), max(0, pages.count - 1))
                 offset = savedPosition.scroll
+            } else if startAtEnd {
+                // Turning back past the first page continues from the previous chapter's end, as on Android.
+                index = max(0, pages.count - 1); offset = 0
             }
+            startAtEnd = false
             configure(size: viewport, preferences: preferences)
             restoreOrigin = CGFloat(engine.scrollOrigin(index: Int32(index), offset: offset))
             awaitingRestore = preferences.mode >= 3
             loaded = true; pageRevision += 1
             await refreshBookmarks()
-        } catch { if !Task.isCancelled && request == token { self.error = error.localizedDescription } }
+        } catch { if !Task.isCancelled && request == token { fail(error) } }
     }
 
     func loadImage(at target: Int) async {
-        guard loaded, pages.indices.contains(target), images[target] == nil, !loading.contains(target) else { return }
+        guard loaded, pages.indices.contains(target), images[target] == nil, !loading.contains(target) else {
+            if target == index { prefetch() }
+            return
+        }
         let token = request
         let page = pages[target]
         let cropMargins = preferences.cropMargins
         loading.insert(target)
         defer { if request == token { loading.remove(target) } }
         do {
-            let loadedPage = try await ReaderDownloads.loadedPage(
-                runtime: runtime, content: content, chapter: chapter,
-                page: page, index: target, cropMargins: cropMargins
-            )
+            let loadedPage: ReaderLoadedPage
+            if ReaderDownloads.isDownloaded(content: content, chapter: chapter) {
+                loadedPage = try await ReaderDownloads.loadedPage(
+                    runtime: runtime, content: content, chapter: chapter,
+                    page: page, index: target, cropMargins: cropMargins
+                )
+            } else {
+                loadedPage = try await pageArtifact(at: target).loadedPage(cropMargins: cropMargins)
+            }
             guard request == token else { return }
             images[target] = loadedPage.image
             artifacts[target] = loadedPage.artifact
@@ -115,8 +153,73 @@ final class SourceReaderModel: ObservableObject {
             images = images.filter { keep.contains($0.key) }
             artifacts = artifacts.filter { keep.contains($0.key) }
             if slots.first(where: { $0.placements.contains { Int($0.index) == index } })?
-                .placements.contains(where: { Int($0.index) == target }) == true { await persist() }
-        } catch { if !Task.isCancelled && request == token { self.error = error.localizedDescription } }
+                .placements.contains(where: { Int($0.index) == target }) == true {
+                prefetch()
+                await persist()
+            }
+        } catch { if !Task.isCancelled && request == token { fail(error) } }
+    }
+
+    /// The page's downloaded artifact. A prefetch already under way is joined and moved ahead of other prefetches;
+    /// a download only the screen wanted is cancelled once no page view waits for it, as Android releases it.
+    private func pageArtifact(at target: Int) async throws -> IosSourceImage {
+        let fetch = fetches[target] ?? startFetch(at: target, isPrefetch: false)
+        fetch.consumers += 1
+        await pageGate.promote(fetch.ticket, to: ReaderLoading.visiblePriority)
+        var released = false
+        let release = { [weak self] in
+            guard !released else { return }
+            released = true
+            fetch.consumers -= 1
+            if fetch.consumers == 0, !fetch.isPrefetch, !fetch.finished {
+                fetch.task.cancel()
+                if self?.fetches[target] === fetch { self?.fetches[target] = nil }
+            }
+        }
+        defer { release() }
+        return try await withTaskCancellationHandler {
+            try await fetch.task.value
+        } onCancel: {
+            Task { @MainActor in release() }
+        }
+    }
+
+    @discardableResult
+    private func startFetch(at target: Int, isPrefetch: Bool) -> PageFetch {
+        let runtime = runtime, page = pages[target], gate = pageGate
+        let ticket = RequestGate.makeTicket()
+        let priority = isPrefetch ? ReaderLoading.prefetchPriority : ReaderLoading.visiblePriority
+        let task = Task { try await gated(gate, priority: priority, ticket: ticket) { try await runtime.image(page: page) } }
+        let fetch = PageFetch(task: task, ticket: ticket, isPrefetch: isPrefetch)
+        fetches[target] = fetch
+        let token = request
+        Task { [weak self] in
+            let succeeded = (try? await task.value) != nil
+            guard let self, self.request == token, self.fetches[target] === fetch else { return }
+            if succeeded { fetch.finished = true } else { self.fetches[target] = nil }
+        }
+        return fetch
+    }
+
+    /// Android's reader offers the ten pages after the visible ones and keeps the nearest `prefetch limit` of them
+    /// queued; pages that dropped out of that window are no longer wanted. Downloaded chapters need nothing.
+    private func prefetch() {
+        guard loaded, !ReaderDownloads.isDownloaded(content: content, chapter: chapter) else { return }
+        let upper = slots.first { $0.placements.contains { Int($0.index) == index } }?
+            .placements.map { Int($0.index) }.max() ?? index
+        let window = Set((upper + 1)..<min(pages.count, upper + 1 + ReaderLoading.prefetchWindow))
+        for (target, fetch) in fetches where fetch.isPrefetch && !fetch.finished && fetch.consumers == 0 && !window.contains(target) {
+            fetch.task.cancel()
+            fetches[target] = nil
+        }
+        guard ReaderLoading.isPrefetchApplicable else { return }
+        let wanted = window.sorted().filter { fetches[$0] == nil && images[$0] == nil }.prefix(ReaderLoading.prefetchLimit)
+        for target in wanted { startFetch(at: target, isPrefetch: true) }
+    }
+
+    private func cancelFetches() {
+        for fetch in fetches.values where !fetch.finished { fetch.task.cancel() }
+        fetches = [:]
     }
 
     func displayImage(for target: Int, segment: Int) -> UIImage? {
@@ -142,6 +245,15 @@ final class SourceReaderModel: ObservableObject {
         slotIndex = Int(slots.first { $0.anchor == Int32(index) }?.index ?? 0)
     }
 
+    func setStripZoom(_ value: CGFloat) {
+        guard preferences.mode == 3 else { return }
+        let zoom = min(max(value, CGFloat(IosReader.companion.MINIMUM_ZOOM)), CGFloat(IosReader.companion.MAXIMUM_ZOOM))
+        guard zoom != stripZoom else { return }
+        stripZoom = zoom
+        engine.setZoom(zoom: Float(zoom))
+        slots = engine.slots()
+    }
+
     func userScrolled() { awaitingRestore = false; autoScroll = false }
 
     func jump(to page: Int) {
@@ -156,10 +268,12 @@ final class SourceReaderModel: ObservableObject {
         slotIndex = next; selectSlot(next)
     }
 
-    func moveChapter(_ target: IosSourceChapter) async {
+    func moveChapter(_ target: IosSourceChapter, atEnd: Bool = false) async {
         guard !isLoadingPages else { return }
+        startAtEnd = atEnd
         await persist()
         request = UUID(); chapter = target; loaded = false
+        cancelFetches()
         pages = []; slots = []; images = [:]; artifacts = [:]; loading = []; index = 0; slotIndex = 0; offset = 0; engine.reset()
         await load()
     }
@@ -192,8 +306,13 @@ final class SourceReaderModel: ObservableObject {
         catch { self.error = error.localizedDescription }
     }
 
+    private func fail(_ error: Error) {
+        self.error = SourceErrorText.describe(error)
+        challenge = SourceErrorText.challenge(error)
+    }
+
     func retry() async {
-        error = nil
+        error = nil; challenge = nil
         if loaded { await loadImage(at: index) } else { await load() }
     }
 }
@@ -211,6 +330,7 @@ struct SourceReaderView: View {
     @StateObject private var model: SourceReaderModel
     @StateObject private var settings: ReaderSettings
     @EnvironmentObject private var library: LibraryModel
+    @EnvironmentObject private var downloads: ReaderDownloadQueue
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Namespace private var chrome
@@ -224,7 +344,14 @@ struct SourceReaderView: View {
     @State private var continuousPosition = ScrollPosition(idType: Int.self)
     @State private var scrollOffset = CGPoint.zero
     @State private var downloadStatus: String?
-    @State private var downloading = false
+    @State private var showingDownloads = false
+    private var downloadEntry: ReaderDownloadEntry? { downloads.entry(content: model.content, chapter: model.chapter) }
+    private var downloading: Bool { downloadEntry?.state == .running || downloadEntry?.state == .queued }
+    private var currentDownloadStatus: String? {
+        if let downloadStatus { return downloadStatus }
+        if downloadEntry?.state == .completed { return "本章已下载，可离线阅读" }
+        return downloadEntry?.status
+    }
 
     init(runtime: IosSources, content: IosSourceContent, chapter: IosSourceChapter) {
         _model = StateObject(wrappedValue: SourceReaderModel(runtime: runtime, content: content, chapter: chapter))
@@ -234,13 +361,16 @@ struct SourceReaderView: View {
     var body: some View {
         GeometryReader { geometry in
             ZStack {
-                settings.background.ignoresSafeArea()
                 readingSurface(size: geometry.size)
-                    .onTapGesture { withAnimation(chromeAnimation) { controls.toggle(); panel = nil } }
+                    .onTapGesture(coordinateSpace: .local) { location in tap(at: location, size: geometry.size) }
                 if model.isLoadingPages { ProgressView("正在读取漫画页…").tint(.gray) }
                 if let error = model.error {
                     VStack {
                         Text(error).foregroundStyle(.red).accessibilityIdentifier("reader.error")
+                        if let challenge = model.challenge {
+                            ChallengeVerifyButton(challenge: challenge, runtime: model.runtime,
+                                                  sourceName: model.content.sourceName) { await model.retry() }
+                        }
                         Button("重试") { Task { await model.retry() } }.buttonStyle(.glass)
                     }.padding().background(.regularMaterial, in: .rect(cornerRadius: 16))
                 }
@@ -256,7 +386,9 @@ struct SourceReaderView: View {
                 if value.mode >= 3 { scrollContinuous(to: CGFloat(model.engine.scrollOrigin(index: Int32(model.index), offset: 0))) }
             }
         }
-        .navigationBarBackButtonHidden()
+        // Outside the clipped canvas, so the page background also fills the status bar and home indicator areas.
+        .background(settings.background.ignoresSafeArea())
+        .background(EdgeSwipeBack())
         .toolbar(.hidden, for: .navigationBar, .tabBar)
         .statusBarHidden(!controls)
         .task {
@@ -291,6 +423,8 @@ struct SourceReaderView: View {
             }
         }
         .onDisappear { model.autoScroll = false; Task { await model.persist(); await library.refresh() } }
+        .readerPresence()
+        .sheet(isPresented: $showingDownloads) { ReaderDownloadsSheet() }
         .fileExporter(isPresented: $exporting, document: export, contentType: .png,
                       defaultFilename: "\(model.content.title)-\(model.index + 1)") { result in
             if case .failure(let error) = result { downloadStatus = error.localizedDescription }
@@ -302,11 +436,43 @@ struct SourceReaderView: View {
         }
     }
 
+    /// Android's ADVANCED and SIMULATION turns (stored as 4 and 5) need a pager that owns its travel
+    /// (see `ReaderTurnPager`); the value passed on is Android's `ReaderAnimation` ordinal.
+    private var turnStyle: Int? {
+        let style = settings.value.animation
+        return settings.value.mode < 3 && !reduceMotion && (style == 4 || style == 5) ? style - 2 : nil
+    }
+
     @ViewBuilder
     private func readingSurface(size: CGSize) -> some View {
+        if let style = turnStyle {
+            ReaderTurnPager(
+                count: model.slots.count,
+                current: Binding(get: { model.slotIndex }, set: { model.slotIndex = $0 }),
+                style: style, vertical: settings.value.mode == 2, mirrored: settings.value.mode == 1,
+                engine: model.engine, size: size,
+                isLocked: { model.isPageZoomed },
+                onSettle: { slot in model.userScrolled(); model.selectSlot(slot) }
+            ) { slot in
+                if let spread = model.slots.first(where: { Int($0.index) == slot }) {
+                    // Opaque like Android's slot background: the next page waits pinned underneath.
+                    ReaderSpread(model: model, settings: settings, slot: spread, size: size)
+                        .background(settings.background)
+                }
+            }
+            .id("\(settings.value.mode)-\(model.chapter.id)")
+        } else {
+            scrollingSurface(size: size)
+        }
+    }
+
+    @ViewBuilder
+    private func scrollingSurface(size: CGSize) -> some View {
         let vertical = settings.value.mode == 2 || settings.value.mode == 3
         let continuous = settings.value.mode >= 3
-        ScrollView(vertical ? .vertical : .horizontal) {
+        let strip = settings.value.mode == 3
+        // The vertical strip also scrolls across once zoomed wider than the screen.
+        ScrollView(strip ? [.vertical, .horizontal] : vertical ? .vertical : .horizontal) {
             Group {
                 if vertical {
                     LazyVStack(spacing: 0) { slots(size: size, continuous: continuous) }
@@ -317,11 +483,13 @@ struct SourceReaderView: View {
             .scrollTargetLayout()
         }
         .scrollIndicators(.hidden)
-        .scrollTargetBehavior(ReaderScrollBehavior(paged: !continuous))
+        .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+        .modifier(ReaderPaging(paged: !continuous))
         .modifier(ReaderScrollPosition(continuous: continuous, position: $continuousPosition,
                                       slot: Binding<Int?>(get: { model.slotIndex },
                                           set: { if let value = $0 { model.slotIndex = value; model.selectSlot(value) } })))
         .environment(\.layoutDirection, settings.value.mode == 1 || settings.value.mode == 4 ? .rightToLeft : .leftToRight)
+        .id(settings.value.mode)
         .onScrollGeometryChange(for: CGPoint.self) { $0.contentOffset } action: { _, point in
             if continuous { scrollOffset = point; model.continuousPosition(x: point.x, y: point.y) }
         }
@@ -333,6 +501,9 @@ struct SourceReaderView: View {
             if continuous, let page { scrollContinuous(to: CGFloat(model.engine.scrollOrigin(index: Int32(page), offset: 0))) }
         }
         .onChange(of: model.chapter.id) { _, _ in continuousPage = nil }
+        .modifier(ReaderStripZoom(enabled: strip, zoom: model.stripZoom, size: size) { zoom, location in
+            zoomStrip(to: zoom, at: location, size: size)
+        })
         .onChange(of: model.loaded) { _, loaded in
             if continuous && loaded { scrollContinuous(to: model.restoreOrigin) }
         }
@@ -458,14 +629,16 @@ struct SourceReaderView: View {
                 } else {
                     ReaderMorePanel(settings: settings, autoScroll: $model.autoScroll,
                                     isBookmarked: model.isBookmarked,
-                                    status: downloadStatus, downloading: downloading,
+                                    status: currentDownloadStatus, downloading: downloading,
                                     onAction: moreAction)
                 }
             }
             .frame(maxHeight: 540)
             .glassEffect(.regular, in: .rect(cornerRadius: 28))
             .glassEffectID(panel == .chapters ? "chapters" : "more", in: chrome)
-            .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
+            .glassEffectTransition(.matchedGeometry)
+            // Grow out of the control that opened the panel: the centred chapter capsule or the trailing more button.
+            .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: panelAnchor(panel))))
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier(panel == .chapters ? "reader.chapterPanel" : "reader.morePanel")
         } else {
@@ -473,14 +646,16 @@ struct SourceReaderView: View {
                 Button("返回", systemImage: "chevron.left") { dismiss() }
                     .labelStyle(.iconOnly).buttonStyle(.glass).buttonBorderShape(.circle).controlSize(.large)
                     .frame(width: controlDiameter, height: controlDiameter).accessibilityIdentifier("reader.back")
-                Spacer(minLength: 8)
+                // Wider than the glass container's merge spacing: neighbouring controls must stay separate shapes,
+                // or the panel morphs out of their union instead of out of the button that was tapped.
+                Spacer(minLength: 16)
                 Button { withAnimation(chromeAnimation) { panel = .chapters } } label: {
                     Label(model.chapter.title, systemImage: "list.bullet").font(.subheadline).lineLimit(1)
                         .padding(.horizontal, 14).padding(.vertical, 12)
                 }
                 .buttonStyle(.plain).glassEffect(.regular.interactive(), in: .capsule)
                 .glassEffectID("chapters", in: chrome).accessibilityIdentifier("reader.chapters")
-                Spacer(minLength: 8)
+                Spacer(minLength: 16)
                 Button { withAnimation(chromeAnimation) { panel = .more } } label: {
                     Image(systemName: "ellipsis").frame(width: controlDiameter, height: controlDiameter)
                 }.buttonStyle(.plain).glassEffect(.regular.interactive(), in: .circle)
@@ -490,13 +665,77 @@ struct SourceReaderView: View {
     }
 
     private func closePanel() { withAnimation(chromeAnimation) { panel = nil } }
+
+    private func panelAnchor(_ panel: ReaderPanel) -> UnitPoint {
+        let bottom = settings.value.bottomPanels
+        return panel == .more ? (bottom ? .bottomTrailing : .topTrailing) : (bottom ? .bottom : .top)
+    }
+
+    /// Android-style tap grid: edges turn pages (mirrored for right-to-left), the centre toggles the controls.
+    private func tap(at location: CGPoint, size: CGSize) {
+        if panel != nil { closePanel(); return }
+        guard settings.value.tapZones, size.width > 0, size.height > 0 else {
+            withAnimation(chromeAnimation) { controls.toggle() }; return
+        }
+        let x = location.x / size.width, y = location.y / size.height
+        var forward: Bool?
+        if x < 0.3 { forward = false } else if x > 0.7 { forward = true }
+        else if y < 0.2 { forward = false } else if y > 0.8 { forward = true }
+        guard var direction = forward else { withAnimation(chromeAnimation) { controls.toggle() }; return }
+        let rtl = settings.value.mode == 1 || settings.value.mode == 4
+        if rtl && x < 0.3 || rtl && x > 0.7 { direction.toggle() }
+        if settings.value.reverseTaps { direction.toggle() }
+        if controls { withAnimation(chromeAnimation) { controls = false } }
+        turn(forward: direction, size: size)
+    }
+
+    private func turn(forward: Bool, size: CGSize) {
+        model.userScrolled()
+        if settings.value.mode >= 3 {
+            let vertical = settings.value.mode == 3
+            let current = vertical ? scrollOffset.y : scrollOffset.x
+            let step = (vertical ? size.height : size.width) * 0.85 * (forward ? 1 : -1)
+            let limit = CGFloat(model.engine.scrollLimit())
+            if forward && current >= limit - 1, let next = model.nextChapter { Task { await model.moveChapter(next) }; return }
+            if !forward && current <= 1, let previous = model.previousChapter {
+                Task { await model.moveChapter(previous, atEnd: true) }; return
+            }
+            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.22)) { scrollContinuous(to: min(max(0, current + step), limit)) }
+            return
+        }
+        let target = model.slotIndex + (forward ? 1 : -1)
+        if model.slots.indices.contains(target) {
+            withAnimation(pageAnimation) { model.movePage(forward: forward) }
+        } else if let chapter = forward ? model.nextChapter : model.previousChapter {
+            Task { await model.moveChapter(chapter, atEnd: !forward) }
+        }
+    }
     private func scrollContinuous(to origin: CGFloat) {
-        if settings.value.mode == 3 { continuousPosition.scrollTo(y: origin) }
+        // The strip keeps its horizontal pan while moving along the chapter.
+        if settings.value.mode == 3 { continuousPosition.scrollTo(point: CGPoint(x: scrollOffset.x, y: origin)) }
         else { continuousPosition.scrollTo(x: origin) }
+    }
+
+    /// Lays the strip out at [zoom] and scrolls so the content under [location] (a point in the viewport) stays put.
+    private func zoomStrip(to zoom: CGFloat, at location: CGPoint, size: CGSize) {
+        let previous = model.stripZoom
+        model.setStripZoom(zoom)
+        let ratio = model.stripZoom / previous
+        guard ratio != 1 else { return }
+        let x = (scrollOffset.x + location.x) * ratio - location.x
+        let y = (scrollOffset.y + location.y) * ratio - location.y
+        let target = CGPoint(x: min(max(0, x), size.width * (model.stripZoom - 1)),
+                             y: min(max(0, y), CGFloat(model.engine.scrollLimit())))
+        scrollOffset = target
+        Task { @MainActor in
+            // After the wider layout is in place, or the scroll view clamps to the old content size.
+            await Task.yield()
+            continuousPosition.scrollTo(point: target)
+        }
     }
     private var chromeAnimation: Animation? { reduceMotion ? nil : .spring }
     private var pageAnimation: Animation? {
-        reduceMotion || settings.value.animation == 0 ? nil : .easeInOut(duration: 0.25)
+        reduceMotion || settings.value.animation == 0 ? nil : .snappy(duration: 0.22)
     }
     private var floatingActions: [String] {
         var actions = settings.value.floatingActions.filter { $0 != "bookmark" }
@@ -512,16 +751,11 @@ struct SourceReaderView: View {
         case "crop": if model.image != nil { closePanel(); cropping = true }
         case "direction": settings.value.mode = settings.value.mode == 1 ? 0 : 1
         case "browser": if let url = URL(string: model.content.publicUrl) { UIApplication.shared.open(url) }
+        case "downloads": showingDownloads = true
         case "download":
             guard !downloading else { return }
-            downloading = true; downloadStatus = "正在保存本章…"
-            Task {
-                do {
-                    try await ReaderDownloads.download(runtime: model.runtime, content: model.content, chapter: model.chapter)
-                    downloadStatus = "本章已下载，可离线阅读"
-                } catch { downloadStatus = error.localizedDescription }
-                downloading = false
-            }
+            do { try downloads.enqueue(content: model.content, chapters: [model.chapter]); downloadStatus = nil }
+            catch { downloadStatus = error.localizedDescription }
         default: break
         }
     }
@@ -529,10 +763,92 @@ struct SourceReaderView: View {
 
 enum ReaderPanel { case chapters, more }
 
-private struct ReaderScrollBehavior: ScrollTargetBehavior {
+/// Hiding the navigation bar also turns off the navigation controller's left-edge swipe back. While the reader
+/// is on screen this restores that edge gesture (not the full-width content swipe, which would fight page turns),
+/// and hands the previous delegate back when it leaves.
+struct EdgeSwipeBack: UIViewControllerRepresentable {
+    func makeUIViewController(context: Context) -> Controller { Controller() }
+    func updateUIViewController(_ controller: Controller, context: Context) {}
+
+    final class Controller: UIViewController, UIGestureRecognizerDelegate {
+        private weak var previous: UIGestureRecognizerDelegate?
+        private weak var recognizer: UIGestureRecognizer?
+        /// SwiftUI turns the gesture off again while its bar is hidden; keep it on while the reader shows.
+        private var enabledObservation: NSKeyValueObservation?
+
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            guard let gesture = navigationController?.interactivePopGestureRecognizer, gesture.delegate !== self else { return }
+            previous = gesture.delegate
+            recognizer = gesture
+            gesture.delegate = self
+            gesture.isEnabled = true
+            enabledObservation = gesture.observe(\.isEnabled, options: [.new]) { gesture, change in
+                if change.newValue == false { DispatchQueue.main.async { gesture.isEnabled = true } }
+            }
+        }
+
+        override func viewWillDisappear(_ animated: Bool) {
+            super.viewWillDisappear(animated)
+            enabledObservation = nil
+            if let recognizer, recognizer.delegate === self { recognizer.delegate = previous }
+        }
+
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            (navigationController?.viewControllers.count ?? 0) > 1
+        }
+
+        /// The page scroll view and the reader's drags wait for the edge swipe, which fails at once for any touch that
+        /// does not start at the screen edge, so turning pages is unaffected.
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldBeRequiredToFailBy other: UIGestureRecognizer) -> Bool { other !== gestureRecognizer }
+    }
+}
+
+/// The system `.paging` behavior maps to native scroll-view paging: one page per swipe with the platform's
+/// release animation. Wrapping it in a custom behavior loses that and lets fast flicks project past pages.
+/// Pinch and double-tap zoom for the vertical strip. The pinch previews as a transform about its centre; on release
+/// the strip is laid out again at the new zoom (see `SourceReaderModel.setStripZoom`).
+private struct ReaderStripZoom: ViewModifier {
+    let enabled: Bool
+    let zoom: CGFloat
+    let size: CGSize
+    let commit: (CGFloat, CGPoint) -> Void
+    @State private var pinch: CGFloat = 1
+    @State private var anchor = UnitPoint.center
+
+    func body(content: Content) -> some View {
+        if enabled {
+            content
+                .scaleEffect(pinch, anchor: anchor)
+                .simultaneousGesture(
+                    MagnifyGesture()
+                        .onChanged { value in
+                            anchor = value.startAnchor
+                            let minimum = CGFloat(IosReader.companion.MINIMUM_ZOOM) / zoom
+                            let maximum = CGFloat(IosReader.companion.MAXIMUM_ZOOM) / zoom
+                            pinch = min(max(value.magnification, minimum), maximum)
+                        }
+                        .onEnded { value in
+                            let target = zoom * pinch
+                            pinch = 1
+                            commit(target, value.startLocation)
+                        }
+                )
+                .onTapGesture(count: 2) { location in commit(zoom > 1 ? 1 : 2, location) }
+                .accessibilityAction(named: zoom > 1 ? "还原缩放" : "放大") {
+                    commit(zoom > 1 ? 1 : 2, CGPoint(x: size.width / 2, y: size.height / 2))
+                }
+        } else {
+            content
+        }
+    }
+}
+
+private struct ReaderPaging: ViewModifier {
     let paged: Bool
-    func updateTarget(_ target: inout ScrollTarget, context: TargetContext) {
-        if paged { PagingScrollTargetBehavior().updateTarget(&target, context: context) }
+    func body(content: Content) -> some View {
+        if paged { content.scrollTargetBehavior(.paging) } else { content }
     }
 }
 
@@ -656,15 +972,18 @@ private struct ReaderSpread: View {
                     .offset(x: CGFloat(placement.x), y: CGFloat(placement.y))
             }
         }
-        .frame(width: size.width, height: size.height)
+        // Placements already include centering; keep their origin at the top-left of the viewport.
+        .frame(width: size.width, height: size.height, alignment: .topLeading)
         .scaleEffect(scale).offset(pan)
         .frame(width: size.width, height: size.height).clipped()
+        .environment(\.layoutDirection, .leftToRight)
         .simultaneousGesture(MagnifyGesture().onChanged { scale = min(6, max(1, baseScale * $0.magnification)) }
             .onEnded { _ in baseScale = scale; clamp() })
         .highPriorityGesture(DragGesture().onChanged {
             if canPan { pan = CGSize(width: basePan.width + $0.translation.width, height: basePan.height + $0.translation.height) }
         }.onEnded { _ in if canPan { clamp() } }, including: canPan ? .all : .subviews)
         .onTapGesture(count: 2) { withAnimation { scale = scale > 1 ? 1 : 2; baseScale = scale; clamp() } }
+        .onChange(of: scale > 1) { _, zoomed in model.isPageZoomed = zoomed }
     }
     private var canPan: Bool {
         scale > 1 || (slot.placements.map { $0.x + $0.width }.max() ?? 0) > Float(size.width) ||

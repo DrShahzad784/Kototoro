@@ -164,13 +164,16 @@ internal class JarFixture(private val root: Path, runtimeApi: Boolean = false) {
                 </application>
             </manifest>
         """.trimIndent()
-        fun manifest(packageName: String = "fixture.extension", entry: String = ".Single") = """
+        fun manifest(
+            packageName: String = "fixture.extension", entry: String = ".Single",
+            versionName: String = "1.6.16", libraryMarker: Boolean = true,
+        ) = """
             <?xml version="1.0" encoding="utf-8"?>
             <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="$packageName"
-                android:versionCode="16" android:versionName="1.6.16">
+                android:versionCode="16" android:versionName="$versionName">
                 <application android:label="Fixture">
                     <meta-data android:name="tachiyomix.name" android:value="漫画 &amp; fixture"/>
-                    <meta-data android:name="tachiyomix.extensionLib" android:value="1.6"/>
+                    ${if (libraryMarker) """<meta-data android:name="tachiyomix.extensionLib" android:value="1.6"/>""" else ""}
                     <meta-data android:name="tachiyomi.extension.class" android:value="$entry"/>
                     <meta-data android:name="tachiyomi.extension.nsfw" android:value="0"/>
                 </application>

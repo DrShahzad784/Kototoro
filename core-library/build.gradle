@@ -12,6 +12,8 @@ kotlin {
             api project(':core-db')
             api project(':core-domain')
             api project(':core-source')
+            // Shared backup DTOs; the merge into the v84 tables lives here for every non-Android platform.
+            api project(':core-backup')
             implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:${libs.versions.coroutines.get()}"
         }
         commonTest.dependencies { implementation kotlin('test') }

@@ -37,12 +37,18 @@ class SourceLibrary(
                 .groupBy { it.mangaId }
             val items = if (history) history() else favourites()
             val progress = database.getHistoryDao().findAllByMangaIds(items.map { it.id }).associateBy { it.mangaId }
+            // One lookup of just the chapters being read; works can hold thousands of chapters each.
+            val chapters = if (history) {
+                database.getChaptersDao().findByIds(progress.values.map { it.chapterId })
+                    .associateBy { it.mangaId to it.chapterId }
+            } else emptyMap()
             SourceLibrarySnapshot(items.map { item ->
                 val member = memberships[item.id].orEmpty()
                 val reading = progress[item.id]
                 SourceLibraryEntry(item, member.map { it.categoryId }.toSet(),
                     if (history) reading?.updatedAt ?: 0L else member.maxOfOrNull { it.updatedAt } ?: 0L,
-                    reading?.updatedAt, reading?.percent)
+                    reading?.updatedAt, reading?.percent,
+                    reading?.let { chapters[item.id to it.chapterId] }?.let { SourceLibraryChapter(it.title, it.number) })
             }, categories.map { SourceLibraryCategory(it.categoryId.toLong(), it.title) })
         }
     }

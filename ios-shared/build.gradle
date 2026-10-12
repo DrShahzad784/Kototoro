@@ -1,6 +1,7 @@
 // iOS composition root. Swift sees a small application API, rather than Room or parser implementation types.
 plugins {
     id 'org.jetbrains.kotlin.multiplatform'
+    id 'org.jetbrains.kotlin.plugin.serialization'
 }
 
 // Accept an existing simulator UUID so native tests can use the same device as the SwiftUI app.
@@ -29,6 +30,7 @@ kotlin {
             implementation project(':core-net')
             implementation project(':reader-core')
             implementation project(':source-tvbox')
+            implementation project(':core-local')
             // Apple's URL loading system; core-net already pins Ktor and leaves engines to platforms.
             implementation libs.ktor.client.darwin
             // Same pinned driver already used by the shared database's JVM tests.

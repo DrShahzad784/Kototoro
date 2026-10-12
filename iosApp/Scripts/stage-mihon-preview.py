@@ -44,7 +44,9 @@ ARTIFACTS = [
      "https://raw.githubusercontent.com/skepsun/kototoro-parsers/repo/apk/plugin.jar",
      "0826c8c91d671fa2a2fc961e274ce2542f2a124c8b2944b690cb3b336b4b0422"),
 ]
-PLUGIN_IDS = {"kototoro-parsers-plugin-137.jar": "kototoro-parsers"}
+# Same id as the repository's package, so installing it from skepsun/kototoro-parsers replaces the bundled copy
+# instead of loading the same ~1,000 parsers twice.
+PLUGIN_IDS = {"kototoro-parsers-plugin-137.jar": "org.skepsun.kototoro.parsers"}
 
 # Our Kotlin runtime wins over the Mobile API copies (as before); for every other artifact both provide, the Mobile
 # API's copy is the single one on the classpath so OkHttp/okio/jsoup are shared by all ecosystems.

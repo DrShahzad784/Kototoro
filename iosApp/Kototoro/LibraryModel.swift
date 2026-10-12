@@ -55,6 +55,34 @@ final class LibraryModel: ObservableObject {
         }
     }
 
+    func renameCategory(_ id: Int32, to title: String) async -> Bool {
+        await editCategories { try await $0.renameCategory(id: id, title: title) }
+    }
+
+    func removeCategory(_ id: Int32) async -> Bool {
+        await editCategories { try await $0.removeCategory(id: id) }
+    }
+
+    func saveCategoryLayout(_ ordered: [IosCategory], visible: Set<Int32>) async -> Bool {
+        await editCategories {
+            try await $0.saveCategoryLayout(orderedIds: ordered.map { KotlinInt(value: $0.id) },
+                                            visibleIds: visible.map { KotlinInt(value: $0) })
+        }
+    }
+
+    private func editCategories(_ edit: (IosLibrary) async throws -> Void) async -> Bool {
+        guard let library else { return false }
+        error = nil
+        do {
+            try await edit(library)
+            try await refreshRecords()
+            return true
+        } catch {
+            self.error = error.localizedDescription
+            return false
+        }
+    }
+
     func refresh() async {
         do { try await refreshRecords() }
         catch { self.error = error.localizedDescription }

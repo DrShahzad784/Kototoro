@@ -75,11 +75,8 @@ import org.skepsun.kototoro.reader.data.TapGridSettings
 import org.skepsun.kototoro.settings.sources.unified.UnifiedRecommendedRepositories
 import org.skepsun.kototoro.settings.sources.unified.UnifiedRecommendedRepository
 import org.skepsun.kototoro.settings.sources.unified.UnifiedSourceKind
-import org.skepsun.kototoro.tracker.data.TrackEntity
-import org.skepsun.kototoro.tracker.data.TrackLogEntity
-import org.skepsun.kototoro.tracker.data.canBeClearedBy
-import org.skepsun.kototoro.tracker.data.isNewerThan
-import org.skepsun.kototoro.tracker.data.mergeRestoredTrackNewChapters
+import org.skepsun.kototoro.tracker.data.mergeRestoredTrack
+import org.skepsun.kototoro.tracker.data.mergeRestoredTrackLog
 import org.skepsun.kototoro.tracker.data.normalizeTrackFeedState
 import java.io.ByteArrayInputStream
 import java.io.File
@@ -646,11 +643,11 @@ class BackupRepository @Inject constructor(
                     }
 
                     BackupSection.TRACKS -> sectionInput.readJsonArray<TrackBackup>(serializer()).restoreToDb("TRACKS") {
-                        mergeTrack(it.toEntity())
+                        mergeRestoredTrack(it.toEntity())
                     }
 
                     BackupSection.TRACK_LOGS -> sectionInput.readJsonArray<TrackLogBackup>(serializer()).restoreToDb("TRACK_LOGS") {
-                        mergeTrackLog(it.toEntity())
+                        mergeRestoredTrackLog(it.toEntity())
                     }
 
                     BackupSection.STATS -> sectionInput.readJsonArray<StatisticBackup>(serializer()).restoreToDb("STATS") {
@@ -942,56 +939,6 @@ class BackupRepository @Inject constructor(
             )
         }
         categoryIdMapping[candidate.categoryId.toLong()] = localCategoryId
-    }
-
-    private suspend fun MangaDatabase.mergeTrack(remote: TrackEntity) {
-        val dao = getTracksDao()
-        val local = dao.find(remote.mangaId)
-        if (local == null) {
-            dao.upsert(remote)
-            return
-        }
-        dao.upsert(local.mergeWithRestored(remote))
-    }
-
-    private fun TrackEntity.mergeWithRestored(remote: TrackEntity): TrackEntity {
-        val remoteIsNewer = remote.isNewerThan(this)
-        val newer = if (remoteIsNewer) remote else this
-        val mergedLastError = when {
-            newer.lastResult == TrackEntity.RESULT_FAILED -> newer.lastError
-            lastResult == TrackEntity.RESULT_FAILED && remote.lastResult != TrackEntity.RESULT_FAILED -> remote.lastError
-            else -> null
-        }
-        return TrackEntity(
-            mangaId = mangaId,
-            lastChapterId = newer.lastChapterId,
-            newChapters = mergeRestoredTrackNewChapters(this, remote),
-            lastCheckTime = maxOf(lastCheckTime, remote.lastCheckTime),
-            lastChapterDate = maxOf(lastChapterDate, remote.lastChapterDate),
-            lastResult = newer.lastResult,
-            lastError = mergedLastError,
-        )
-    }
-
-    private suspend fun MangaDatabase.mergeTrackLog(remote: TrackLogEntity) {
-        val dao = getTrackLogsDao()
-        val existing = dao.findDuplicate(
-            mangaId = remote.mangaId,
-            chapters = remote.chapters,
-            createdAt = remote.createdAt,
-        )
-        if (existing == null) {
-            dao.insert(remote)
-        } else if (existing.isUnread && !remote.isUnread) {
-            dao.markAsRead(existing.id)
-            getTracksDao().find(existing.mangaId)
-                ?.takeIf { it.canBeClearedBy(remote) }
-                ?.let { getTracksDao().clearCounter(existing.mangaId) }
-        } else if (!existing.isUnread) {
-            getTracksDao().find(existing.mangaId)
-                ?.takeIf { it.canBeClearedBy(existing) }
-                ?.let { getTracksDao().clearCounter(existing.mangaId) }
-        }
     }
 
     private suspend fun clearRestoreTargets(

@@ -11,13 +11,186 @@ final class ExtensionEcosystemTests: XCTestCase {
         app.launch()
         app.tabBars.buttons["浏览"].tap()
         // Builds without the embedded JVM have no extension section at all: skip at once instead of waiting.
-        if !app.staticTexts["扩展"].waitForExistence(timeout: 15) {
+        if !app.staticTexts["sources.extensionRuntime"].waitForExistence(timeout: 15) {
             throw XCTSkip("This build has no embedded JVM")
         }
         let profile = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "真实扩展兼容性验证")).firstMatch
         if !profile.waitForExistence(timeout: 90) {
             throw XCTSkip("Select the real extension preview profile (stage-mihon-preview.py) to run these tests")
         }
+    }
+
+    /// Content spaces: the native panel narrows browse (and the library and history) app-wide and survives a
+    /// relaunch. With spaces turned off, the page's own content-type switch comes back.
+    @MainActor
+    func testContentSpacesAndPerPageSwitch() throws {
+        let manga = app.buttons["source.MIHON_524579092615598717"]
+        let novel = app.buttons["source.TSUNDOKU_3273374795580060030"]
+        let video = app.buttons["source.ANIYOMI_2247987965040486818"]
+        func chooseSpace(_ title: String) {
+            let menu = app.buttons["space.menu"]
+            XCTAssertTrue(menu.waitForExistence(timeout: 30), app.debugDescription)
+            menu.tap()
+            XCTAssertTrue(app.descendants(matching: .any)["space.panel"].waitForExistence(timeout: 5))
+            let kind = ["全部": "ALL", "漫画": "MANGA", "小说": "NOVEL", "视频": "VIDEO"][title]!
+            let entry = app.buttons["space.select.\(kind)"]
+            XCTAssertTrue(entry.waitForExistence(timeout: 5), app.debugDescription)
+            entry.tap()
+            XCTAssertTrue(app.buttons["space.close"].waitForNonExistence(timeout: 5))
+        }
+        defer { if app.buttons["space.menu"].exists { chooseSpace("全部") } }
+        XCTAssertFalse(app.segmentedControls["contentKind"].exists, "Spaces replace the per-page switch")
+        chooseSpace("小说")
+        XCTAssertTrue(novel.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertFalse(manga.exists)
+        XCTAssertFalse(video.exists)
+        attach("Novel space")
+
+        // Every root page opens the same panel and marks the app-wide choice.
+        for tab in ["作品库", "记录", "浏览"] {
+            app.tabBars.buttons[tab].tap()
+            app.buttons["space.menu"].tap()
+            let selected = app.buttons["space.select.NOVEL"]
+            XCTAssertTrue(selected.waitForExistence(timeout: 5))
+            XCTAssertTrue(selected.isSelected, "\(tab) should share the selected space")
+            XCTAssertTrue(app.buttons["space.select.MANGA"].exists)
+            XCTAssertTrue(app.buttons["space.select.VIDEO"].exists)
+            attach("Space panel \(tab)")
+            app.buttons["space.close"].tap()
+        }
+
+        app.terminate(); app.launch()
+        app.tabBars.buttons["浏览"].tap()
+        XCTAssertTrue(novel.waitForExistence(timeout: 90), "The space should survive relaunch: \(app.debugDescription)")
+        XCTAssertFalse(manga.exists)
+        chooseSpace("全部")
+        XCTAssertTrue(manga.waitForExistence(timeout: 10))
+
+        app.terminate()
+        app.launchArguments += ["-space.enabled", "NO"]
+        app.launch()
+        app.tabBars.buttons["浏览"].tap()
+        let kinds = app.segmentedControls["contentKind"]
+        XCTAssertTrue(kinds.waitForExistence(timeout: 90), app.debugDescription)
+        XCTAssertFalse(app.buttons["space.menu"].exists)
+        kinds.buttons["视频"].tap()
+        XCTAssertTrue(video.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertFalse(novel.exists)
+        attach("Per-page switch")
+        kinds.buttons["全部"].tap()
+    }
+
+    /// Android's continue-reading button as the tab bar accessory: it opens the latest work at its chapter.
+    @MainActor
+    func testContinueReadingAccessoryResumes() throws {
+        openFirstItem(source: "MANGADEX", search: "MANGADEX")
+        openFirstChapter()
+        let image = app.images["reader.image"]
+        waitForEither(image, app.staticTexts["reader.error"], timeout: 90)
+        XCTAssertTrue(image.exists, "Reader failed: \(app.debugDescription)")
+        app.buttons["reader.back"].tap()
+        for _ in 0..<3 where !app.mainTab("作品库").exists {
+            let back = app.navigationBars.buttons["BackButton"].firstMatch
+            guard back.waitForExistence(timeout: 3) else { break }
+            back.tap()
+        }
+        let libraryTab = app.mainTab("作品库")
+        XCTAssertTrue(libraryTab.waitForExistence(timeout: 5), app.debugDescription)
+        libraryTab.tap()
+        let accessory = app.buttons["continueReading"]
+        XCTAssertTrue(accessory.waitForExistence(timeout: 10), app.debugDescription)
+        attach("Continue reading accessory")
+        accessory.tap()
+        XCTAssertTrue(app.images["reader.image"].waitForExistence(timeout: 90), "Accessory should resume reading: \(app.debugDescription)")
+        app.buttons["reader.back"].tap()
+        let close = app.buttons["continueReading.close"]
+        XCTAssertTrue(close.waitForExistence(timeout: 10), app.debugDescription)
+        close.tap()
+        XCTAssertTrue(accessory.waitForExistence(timeout: 10))
+
+        let mangaResume = accessory.label
+        // Leave the app-wide space on everything even when an assertion stops the test midway.
+        defer {
+            if app.buttons["space.menu"].exists {
+                app.buttons["space.menu"].tap()
+                if app.buttons["space.select.ALL"].waitForExistence(timeout: 5) { app.buttons["space.select.ALL"].tap() }
+            }
+        }
+
+        // Resume from a different selected space: the card must use its own latest history item, select that
+        // space, dismiss the panel, and then present the same reader as the accessory.
+        app.buttons["space.menu"].tap()
+        app.buttons["space.select.NOVEL"].tap()
+        // The accessory follows the space: it no longer offers the manga just read (the novel space may hold its own).
+        XCTAssertFalse(accessory.exists && accessory.label == mangaResume,
+                       "Accessory should follow the space: \(app.debugDescription)")
+        app.buttons["space.menu"].tap()
+        let resume = app.buttons["space.resume.MANGA"]
+        XCTAssertTrue(resume.waitForExistence(timeout: 10), app.debugDescription)
+        attach("Space panel resume")
+        resume.tap()
+        XCTAssertTrue(app.images["reader.image"].waitForExistence(timeout: 90), app.debugDescription)
+        XCTAssertFalse(app.buttons["space.close"].exists)
+        app.buttons["reader.back"].tap()
+        app.buttons["continueReading.close"].tap()
+        app.buttons["space.menu"].tap()
+        XCTAssertTrue(app.buttons["space.select.MANGA"].isSelected)
+        app.buttons["space.select.ALL"].tap()
+    }
+
+    /// Android's webtoon zoom: pinching the strip lays it out wider (pages stay sharp), it pans across, and a
+    /// double tap returns to fit.
+    @MainActor
+    func testWebtoonStripPinchZoomPansAndResets() throws {
+        openFirstItem(source: "MIHON_524579092615598717", search: "MIHON_524579092615598717")
+        openFirstChapter()
+        let image = app.images["reader.image"].firstMatch
+        waitForEither(image, element("reader.error"), timeout: 90)
+        XCTAssertTrue(image.exists, "Reader failed: \(app.debugDescription)")
+        selectReaderMode("条漫")
+        defer { selectReaderMode("默认（从左到右）") }
+        let window = app.windows.firstMatch.frame
+        func visibleImage() -> XCUIElement? {
+            app.images.matching(identifier: "reader.image").allElementsBoundByIndex
+                .first { $0.frame.intersects(window) && $0.frame.height > 50 }
+        }
+        XCTAssertTrue(image.waitForExistence(timeout: 30))
+        XCTAssertEqual(visibleImage()?.frame.width ?? 0, window.width, accuracy: 2, "The strip starts at fit width")
+        sleep(1) // let the strip settle after the mode switch before pinching
+
+        visibleImage()?.pinch(withScale: 2.5, velocity: 2)
+        let widened = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            (visibleImage()?.frame.width ?? 0) > window.width * 1.5
+        }, object: nil)
+        wait(for: [widened], timeout: 10)
+        attach("Webtoon zoomed")
+        let before = visibleImage()?.frame.minX ?? 0
+        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.5))
+            .press(forDuration: 0.05, thenDragTo: app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5)))
+        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5))
+            .press(forDuration: 0.05, thenDragTo: app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.5)))
+        let after = visibleImage()?.frame.minX ?? 0
+        XCTAssertLessThan(after, before - 20, "A zoomed strip pans across")
+        attach("Webtoon panned")
+
+        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).doubleTap()
+        let reset = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            guard let frame = visibleImage()?.frame else { return false }
+            return abs(frame.width - window.width) < 2 && abs(frame.minX) < 2
+        }, object: nil)
+        wait(for: [reset], timeout: 10)
+        attach("Webtoon reset")
+    }
+
+    @MainActor
+    func testBrowseToolbarOpensGlobalSearch() throws {
+        let search = app.buttons["sources.globalSearch"]
+        XCTAssertTrue(search.waitForExistence(timeout: 10), app.debugDescription)
+        search.tap()
+        let query = app.searchFields["搜索全部来源中的作品"]
+        XCTAssertTrue(query.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(app.keyboards.firstMatch.exists, "The global search entry should activate its query field")
+        attach("Browse toolbar global search")
     }
 
     @MainActor
@@ -28,6 +201,166 @@ final class ExtensionEcosystemTests: XCTestCase {
         waitForEither(paragraph, element("novel.error"), timeout: 90)
         XCTAssertTrue(paragraph.exists, "Novel text failed: \(app.debugDescription)")
         attach("Tsundoku novel reader")
+    }
+
+    /// Novel chapters download through the shared queue and then read from the download.
+    @MainActor
+    func testTsundokuNovelChapterDownloadsAndReadsOffline() throws {
+        try assertNovelDownloadReadsOffline(source: "TSUNDOKU_3273374795580060030", search: nil)
+    }
+
+    /// Parser plugin novels whose chapters carry illustrations: the pictures are saved with the text.
+    @MainActor
+    func testJarNovelChapterDownloadsAndReadsOffline() throws {
+        try assertNovelDownloadReadsOffline(source: "BILINOVEL", search: "BILINOVEL")
+    }
+
+    private func assertNovelDownloadReadsOffline(source: String, search: String?) throws {
+        openFirstItem(source: source, search: search)
+        openFirstChapter()
+        let paragraph = element("novel.firstParagraph")
+        waitForEither(paragraph, element("novel.error"), timeout: 90)
+        XCTAssertTrue(paragraph.exists, "Novel text failed: \(app.debugDescription)")
+        // Toolbar menus do not carry their identifier; find the download menu by its title.
+        let menu = app.navigationBars.buttons["下载"]
+        XCTAssertTrue(menu.waitForExistence(timeout: 5), app.debugDescription)
+        menu.tap()
+        let current = app.buttons["下载本章"]
+        XCTAssertTrue(current.waitForExistence(timeout: 5), app.debugDescription)
+        if current.isEnabled { current.tap() } else { menu.tap() } // already downloaded by an earlier run
+
+        // The chapter list marks the chapter once its text and pictures are saved.
+        let downloaded = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@",
+                                                          "novel.chapter.", "已下载")).firstMatch
+        var marked = false
+        for _ in 0..<12 where !marked {
+            app.buttons["novel.chapters"].tap()
+            marked = downloaded.waitForExistence(timeout: 5)
+            if !marked {
+                app.buttons["关闭"].firstMatch.tap()
+                sleep(5)
+            }
+        }
+        XCTAssertTrue(marked, "Download did not finish: \(app.debugDescription)")
+        attach("\(source) novel chapter downloaded")
+        app.buttons["关闭"].firstMatch.tap()
+
+        // The reader covers the tab bar's continue-reading accessory.
+        XCTAssertFalse(app.buttons["continueReading"].isHittable, "The accessory should hide in the reader")
+        // Reopening the chapter reads the saved copy.
+        app.navigationBars.buttons["BackButton"].firstMatch.tap()
+        openFirstChapter()
+        XCTAssertTrue(element("novel.offline").waitForExistence(timeout: 30), app.debugDescription)
+        XCTAssertTrue(element("novel.firstParagraph").exists)
+        attach("\(source) novel read offline")
+    }
+
+    /// The root pages' in-place search: cancel closes it for good, a submitted keyword stays as a compact capsule
+    /// that names it, and the capsule clears it in one tap.
+    @MainActor
+    func testRootPageSearchClosesAndShowsKeyword() throws {
+        for tab in ["作品库", "记录", "浏览"] {
+            app.mainTab(tab).tap()
+            let open = app.buttons["pageSearch.open"]
+            XCTAssertTrue(open.waitForExistence(timeout: 10), "\(tab): \(app.debugDescription)")
+            open.tap()
+            let field = app.textFields["pageSearch.field"]
+            XCTAssertTrue(field.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), "\(tab): the field should take focus")
+            field.typeText("zz")
+            app.buttons["pageSearch.cancel"].tap()
+            // Closed, and still closed a moment later (the system field used to refocus right away).
+            XCTAssertTrue(field.waitForNonExistence(timeout: 3), "\(tab): cancel should close the field")
+            sleep(1)
+            XCTAssertFalse(field.exists || app.keyboards.firstMatch.exists, "\(tab): the field reopened")
+            XCTAssertFalse(app.buttons["pageSearch.keyword"].exists, "\(tab): cancel clears the keyword")
+
+            open.tap()
+            XCTAssertTrue(field.waitForExistence(timeout: 5))
+            field.typeText("zz\n")
+            let keyword = app.buttons["pageSearch.keyword"]
+            XCTAssertTrue(keyword.waitForExistence(timeout: 5), "\(tab): submit should leave a keyword capsule")
+            XCTAssertEqual(keyword.label, "正在搜索：zz")
+            XCTAssertFalse(field.exists)
+            attach("\(tab) search keyword capsule")
+            app.buttons["pageSearch.clear"].tap()
+            XCTAssertTrue(keyword.waitForNonExistence(timeout: 3), "\(tab): the capsule clears the search")
+        }
+    }
+
+    /// Each source's settings open from its browse toolbar: the extension's own rows plus the host's User-Agent row
+    /// with presets, and the site in the in-app browser.
+    @MainActor
+    func testSourceSettingsUserAgentPresetsAndBrowser() throws {
+        for (round, (source, search)) in [("MIHON_524579092615598717", "MIHON_524579092615598717"),
+                                          ("MANGADEX", "MANGADEX")].enumerated() {
+            if round > 0 {
+                // A fresh browse page: the previous round's search text would otherwise be extended.
+                app.terminate(); app.launch()
+                app.mainTab("浏览").tap()
+            }
+            let field = searchField()
+            field.tap()
+            field.typeText(search)
+            let row = app.buttons["source.\(source)"]
+            XCTAssertTrue(row.waitForExistence(timeout: 30), app.debugDescription)
+            row.tap()
+            let settings = app.buttons["browse.settings"]
+            XCTAssertTrue(settings.waitForExistence(timeout: 30), app.debugDescription)
+            XCTAssertFalse(app.buttons["browse.filter"].exists, "The toolbar filter button duplicated the chip")
+            settings.tap()
+            let userAgent = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@",
+                                                             "sourceSettings.node.", "User-Agent")).firstMatch
+            XCTAssertTrue(userAgent.waitForExistence(timeout: 30), "\(source) settings: \(app.debugDescription)")
+            attach("\(source) settings")
+            userAgent.tap()
+            let preset = app.buttons["sourceSettings.uaPreset.Windows Chrome"]
+            XCTAssertTrue(preset.waitForExistence(timeout: 5), app.debugDescription)
+            preset.tap()
+            app.buttons["sourceSettings.save"].tap()
+            XCTAssertTrue(userAgent.waitForExistence(timeout: 10))
+            let saved = NSPredicate(format: "label CONTAINS %@", "Windows Chrome")
+            expectation(for: saved, evaluatedWith: userAgent)
+            waitForExpectations(timeout: 10)
+            attach("\(source) user agent preset")
+            // Back to the source's default so other tests keep their requests unchanged.
+            userAgent.tap()
+            app.buttons["恢复来源默认值"].tap()
+            app.buttons["sourceSettings.save"].tap()
+            expectation(for: NSPredicate(format: "label CONTAINS %@", "默认"), evaluatedWith: userAgent)
+            waitForExpectations(timeout: 10)
+
+            // Every source has a domain row too: the parser's own, or the host's for Mihon extensions.
+            let domain = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND (label CONTAINS %@ OR label CONTAINS[c] %@)",
+                                                          "sourceSettings.node.", "域名", "domain")).firstMatch
+            XCTAssertTrue(domain.waitForExistence(timeout: 10), "\(source) has no domain row: \(app.debugDescription)")
+            if source.hasPrefix("MIHON_") {
+                XCTAssertTrue(domain.isEnabled, domain.label)
+                domain.tap()
+                let text = app.textFields["sourceSettings.text"]
+                XCTAssertTrue(text.waitForExistence(timeout: 5), app.debugDescription)
+                text.tap(); text.typeText("mirror.example.org")
+                app.buttons["sourceSettings.save"].tap()
+                expectation(for: NSPredicate(format: "label CONTAINS %@", "mirror.example.org"), evaluatedWith: domain)
+                waitForExpectations(timeout: 10)
+                attach("\(source) domain override")
+                domain.tap()
+                app.buttons["恢复来源默认值"].tap()
+                app.buttons["sourceSettings.save"].tap()
+                expectation(for: NSPredicate(format: "label CONTAINS %@", "默认"), evaluatedWith: domain)
+                waitForExpectations(timeout: 10)
+            }
+
+            let browser = app.buttons["sourceSettings.browser"]
+            XCTAssertTrue(browser.waitForExistence(timeout: 5), app.debugDescription)
+            browser.tap()
+            XCTAssertTrue(element("browser.status").waitForExistence(timeout: 30), app.debugDescription)
+            sleep(3)
+            attach("\(source) in-app browser")
+            app.buttons["browser.done"].tap()
+            XCTAssertTrue(element("browser.status").waitForNonExistence(timeout: 15), app.debugDescription)
+            app.buttons["sourceSettings.done"].tap()
+        }
     }
 
     @MainActor
@@ -46,6 +379,49 @@ final class ExtensionEcosystemTests: XCTestCase {
         waitForEither(image, app.staticTexts["reader.error"], timeout: 90)
         XCTAssertTrue(image.exists, "Reader failed: \(app.debugDescription)")
         attach("JAR manga reader")
+    }
+
+    /// ADVANCED/SIMULATION turns run in the reader's own pager. The drag holds half-way for a few seconds so the
+    /// fold or cover can be captured from the host (`xcrun simctl io <device> screenshot`); the turn then completes.
+    /// The reader's default animation comes from the profile (`reader.defaults`), which the caller prepares.
+    @MainActor
+    func testPageTurnDragAdvances() throws {
+        openFirstItem(source: "MANGADEX", search: "MANGADEX")
+        openFirstChapter()
+        let image = app.images["reader.image"]
+        waitForEither(image, app.staticTexts["reader.error"], timeout: 90)
+        XCTAssertTrue(image.exists, "Reader failed: \(app.debugDescription)")
+        XCTAssertTrue(element("reader.turnPager").waitForExistence(timeout: 10), app.debugDescription)
+        sleep(4) // neighbouring pages load (prefetch) before the turn
+        let page = element("reader.currentPage")
+        // The reading position may be restored from an earlier run; the turn advances from wherever it is.
+        if !page.waitForExistence(timeout: 2) { app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap() }
+        XCTAssertTrue(page.waitForExistence(timeout: 5), app.debugDescription)
+        let before = Int(page.value as? String ?? "") ?? 0
+        let mirrored = ProcessInfo.processInfo.environment["KOTOTORO_TURN_RTL"] == "1"
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: mirrored ? 0.12 : 0.88, dy: 0.62))
+        let end = app.coordinate(withNormalizedOffset: CGVector(dx: mirrored ? 0.55 : 0.45, dy: 0.5))
+        start.press(forDuration: 0.1, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 6)
+        sleep(1)
+        // The centre tap toggles the reader controls; show them if the turn left them hidden.
+        if !page.waitForExistence(timeout: 2) { app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap() }
+        XCTAssertTrue(page.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(page.value as? String, "\(before + 1)", "The turn should land on the next page")
+        attach("After page turn")
+    }
+
+    /// The reader hides the navigation bar's back button; the system left-edge swipe still goes back.
+    @MainActor
+    func testReaderLeftEdgeSwipeGoesBack() throws {
+        openFirstItem(source: "MANGADEX", search: "MANGADEX")
+        openFirstChapter()
+        let image = app.images["reader.image"]
+        waitForEither(image, app.staticTexts["reader.error"], timeout: 90)
+        XCTAssertTrue(image.exists, "Reader failed: \(app.debugDescription)")
+        let edge = app.coordinate(withNormalizedOffset: CGVector(dx: 0.0, dy: 0.5))
+        edge.press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5)))
+        XCTAssertTrue(element("details.title").waitForExistence(timeout: 10), "Edge swipe should return to details: \(app.debugDescription)")
+        XCTAssertFalse(app.images["reader.image"].exists)
     }
 
     @MainActor
@@ -67,13 +443,270 @@ final class ExtensionEcosystemTests: XCTestCase {
         attach("JAR video playback")
     }
 
+    /// Parser plugin sources show the plugin's readable title (not the enum name) and the site's own icon.
+    @MainActor
+    func testJarSourcesShowReadableTitlesAndIcons() throws {
+        let field = searchField()
+        field.tap()
+        field.typeText("MANGADEX")
+        let source = app.buttons["source.MANGADEX"]
+        XCTAssertTrue(source.waitForExistence(timeout: 30), app.debugDescription)
+        XCTAssertTrue(source.label.contains("MangaDex"), "Unreadable title: \(source.label)")
+        sleep(8) // the icon is described and fetched lazily for visible rows
+        attach("JAR source titles and icons")
+    }
+
+    /// Every ecosystem's filter panel: Mihon/Tsundoku/Aniyomi show the extension's own FilterList controls, JAR
+    /// parsers their standard options. One control is changed and the filtered listing must load without error.
+    @MainActor
+    func testFilterPanelsAcrossEcosystems() throws {
+        for (search, prefix) in [
+            ("MIHON_524579092615598717", "source.MIHON_524579092615598717"),
+            ("TSUNDOKU_3273374795580060030", "source.TSUNDOKU_"),
+            ("ANIYOMI_2247987965040486818", "source.ANIYOMI_"), ("MANGADEX", "source.MANGADEX"),
+        ] {
+            let field = app.pageSearchField()
+            XCTAssertTrue(field.waitForExistence(timeout: 10))
+            field.tap()
+            field.typeText(search)
+            let source = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", prefix)).firstMatch
+            XCTAssertTrue(source.waitForExistence(timeout: 30), "Source \(search) missing: \(app.debugDescription)")
+            source.tap()
+            let first = app.descendants(matching: .any)
+                .matching(NSPredicate(format: "identifier BEGINSWITH %@", "source.content.")).firstMatch
+            waitForEither(first, element("sources.error"), timeout: 90)
+            XCTAssertTrue(first.exists, "\(search) browse failed: \(app.debugDescription)")
+            let filter = app.buttons["browse.filterChip"]
+            XCTAssertTrue(filter.waitForExistence(timeout: 30), "\(search) has no filter panel: \(app.debugDescription)")
+            filter.tap()
+            XCTAssertTrue(app.navigationBars["筛选"].waitForExistence(timeout: 10))
+            app.navigationBars["筛选"].swipeUp()
+            let controls = app.descendants(matching: .any).matching(NSPredicate(
+                format: "identifier BEGINSWITH %@ OR identifier BEGINSWITH %@ OR identifier BEGINSWITH %@",
+                "filter.control.", "filter.group.", "filter.tag."))
+            XCTAssertTrue(controls.firstMatch.waitForExistence(timeout: 10), "\(search) sheet is empty: \(app.debugDescription)")
+            attach("\(search) filter sheet")
+            changeOneControl()
+            XCTAssertTrue(app.buttons["filter.apply"].isEnabled)
+            app.buttons["filter.apply"].tap()
+            let empty = element("browse.empty")
+            let done = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                first.exists || empty.exists || self.element("sources.error").exists
+            }, object: nil)
+            wait(for: [done], timeout: 90)
+            XCTAssertFalse(element("sources.error").exists, "\(search) filtered listing failed: \(app.debugDescription)")
+            XCTAssertTrue(filter.label.contains("筛选 "), "Badge should count the change: \(filter.label)")
+            attach("\(search) filtered listing")
+            // Start the next ecosystem from a clean source list.
+            app.terminate()
+            app.launch()
+            app.tabBars.buttons["浏览"].tap()
+            XCTAssertTrue(app.staticTexts["sources.extensionRuntime"].waitForExistence(timeout: 90))
+        }
+    }
+
+    /// Prefers a check box or tag chip, then a genre group's first chip, then a menu's second option.
+    private func changeOneControl() {
+        let toggle = app.switches.matching(NSPredicate(format: "identifier BEGINSWITH %@", "filter.control.")).firstMatch
+        if toggle.exists && toggle.isHittable { toggle.switches.firstMatch.tap(); return }
+        let tag = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "filter.tag.")).firstMatch
+        if tag.exists && tag.isHittable { tag.tap(); return }
+        let group = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "filter.group.")).firstMatch
+        if group.exists && group.isHittable {
+            group.tap()
+            let chip = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND value == %@",
+                                                        "filter.control.", "未选择")).firstMatch
+            if chip.waitForExistence(timeout: 5) { chip.tap(); return }
+        }
+        let menu = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "filter.control.")).firstMatch
+        XCTAssertTrue(menu.exists, "No changeable control: \(app.debugDescription)")
+        menu.tap()
+        let options = app.collectionViews.buttons
+        XCTAssertTrue(options.element(boundBy: 1).waitForExistence(timeout: 5), app.debugDescription)
+        options.element(boundBy: 1).tap()
+    }
+
+    /// The panorama cover sits behind the header, scrolls away with it and stretches on pull-down.
+    @MainActor
+    func testDetailsPanoramaHeader() throws {
+        openFirstItem(source: "MANGADEX", search: "MANGADEX")
+        let chapter = revealChapter(in: app, timeout: 90)
+        XCTAssertTrue(chapter.exists || app.staticTexts["details.error"].exists)
+        app.collectionViews.firstMatch.swipeDown(velocity: .fast) // back to the top for the shot
+        XCTAssertTrue(app.staticTexts["details.title"].exists, app.debugDescription)
+        // The details cover and the panorama share one request; wait for it like a user would.
+        let cover = app.descendants(matching: .any)["details.cover"]
+        let loaded = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value != %@", "加载中"), object: cover)
+        wait(for: [loaded], timeout: 60)
+        XCTAssertEqual(cover.value as? String, "已加载", app.debugDescription)
+        sleep(1)
+        attach("Panorama at rest")
+        let list = app.collectionViews.firstMatch
+        list.swipeUp(velocity: .slow)
+        sleep(1)
+        attach("Panorama scrolled")
+        list.swipeDown(velocity: .fast)
+        list.swipeDown(velocity: .fast)
+        sleep(1)
+        attach("Panorama back at top")
+        XCTAssertTrue(app.staticTexts["details.title"].isHittable)
+        app.tabBars.buttons["设置"].tap()
+        XCTAssertTrue(app.switches["settings.panorama"].waitForExistence(timeout: 10))
+        attach("Panorama settings")
+    }
+
+    /// Browse and library share Android's four display modes; each screen keeps its own choice.
+    @MainActor
+    func testDisplayModesInBrowseAndLibrary() throws {
+        let field = searchField()
+        field.tap()
+        field.typeText("MANGADEX")
+        app.buttons["source.MANGADEX"].tap()
+        let first = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "source.content.")).firstMatch
+        waitForEither(first, element("sources.error"), timeout: 90)
+        XCTAssertTrue(first.exists, app.debugDescription)
+        for mode in ["列表", "详细列表", "紧凑网格", "电影网格", "紧凑电影网格", "网格"] {
+            chooseMode(mode)
+            XCTAssertTrue(first.waitForExistence(timeout: 10), "\(mode): \(app.debugDescription)")
+            sleep(2)
+            attach("Browse \(mode)")
+        }
+        // Grid size: smallest and largest, then back to the default.
+        for (position, name) in [(0.0, "50%"), (1.0, "150%"), (0.5, "100%")] {
+            app.buttons["list.mode"].firstMatch.tap()
+            let slider = app.sliders["list.gridSize"]
+            XCTAssertTrue(slider.waitForExistence(timeout: 5), app.debugDescription)
+            // XCTest assumes a normalized percentage; this control exposes the actual 50–150% scale.
+            // Locate the thumb from that scale and drag it, including to both track endpoints.
+            for _ in 0..<3 where slider.value as? String != name {
+                let value = Double((slider.value as? String ?? "").replacingOccurrences(of: "%", with: ""))
+                let scale = try XCTUnwrap(value)
+                let current = (scale - 50) / 100
+                let thumb = slider.coordinate(withNormalizedOffset: CGVector(dx: 0.05 + 0.9 * current, dy: 0.5))
+                // A long drag can stop one step short; correct from the actual thumb value, keeping strict assertions.
+                let destination = position == 0 ? -0.1 : position == 1 ? 1.1 : position
+                let target = slider.coordinate(withNormalizedOffset: CGVector(dx: destination, dy: 0.5))
+                thumb.press(forDuration: 0.3, thenDragTo: target, withVelocity: .slow, thenHoldForDuration: 0.3)
+            }
+            attach("Grid size control \(name)")
+            XCTAssertEqual(slider.value as? String, name)
+            app.buttons["list.options.done"].tap()
+            sleep(1)
+            if name != "100%" { attach("Browse grid \(name)") }
+        }
+        first.tap()
+        let favourite = app.buttons["details.favourite"]
+        XCTAssertTrue(favourite.waitForExistence(timeout: 60))
+        let enabled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: favourite)
+        wait(for: [enabled], timeout: 60)
+        let title = app.staticTexts["details.title"].label
+        if favourite.label == "收藏" { favourite.tap() }
+        app.tabBars.buttons["作品库"].tap()
+        let card = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@",
+                                                                        "favourite.", String(title.prefix(12)))).firstMatch
+        XCTAssertTrue(card.waitForExistence(timeout: 30), app.debugDescription)
+        XCTAssertTrue(app.buttons["category.all"].exists)
+        for mode in ["列表", "详细列表", "紧凑网格", "电影网格", "紧凑电影网格", "网格"] {
+            chooseMode(mode)
+            XCTAssertTrue(card.waitForExistence(timeout: 10), "\(mode): \(app.debugDescription)")
+            sleep(1)
+            attach("Library \(mode)")
+        }
+        // Leave the shared simulator library as it was for other tests.
+        let added = app.buttons[card.identifier]
+        added.press(forDuration: 1.2)
+        let remove = app.buttons["取消收藏"]
+        attach("Library context actions")
+        XCTAssertTrue(remove.waitForExistence(timeout: 5), app.debugDescription)
+        remove.tap()
+        XCTAssertTrue(added.waitForNonExistence(timeout: 10), app.debugDescription)
+    }
+
+    private func chooseMode(_ title: String) {
+        let menu = app.buttons["list.mode"].firstMatch
+        XCTAssertTrue(menu.waitForExistence(timeout: 10), app.debugDescription)
+        menu.tap()
+        let option = app.buttons[title].firstMatch
+        XCTAssertTrue(option.waitForExistence(timeout: 5), "\(title) option: \(app.debugDescription)")
+        option.tap()
+        app.buttons["list.options.done"].tap()
+    }
+
+    /// Per-source switches (Android's source settings): a disabled source leaves the browse list, the management
+    /// tab shows it, and the browse layout/filters work on what remains. Multilingual plugins start with only the
+    /// system language's sources enabled.
+    @MainActor
+    func testSourceSwitchesLayoutAndFiltersInBrowse() throws {
+        let browseSource = app.buttons["source.MANGADEX"]
+        let toggle = app.switches["source.toggle.MANGADEX"]
+        let tabs = app.segmentedControls["repository.tabs"]
+        /// Opens the 来源 tab searched for MangaDex and sets its switch.
+        func setMangaDex(_ enabled: Bool) {
+            dismissSearch()
+            app.buttons["sources.repositories"].tap()
+            XCTAssertTrue(tabs.waitForExistence(timeout: 30))
+            tabs.buttons["来源"].tap()
+            let search = app.pageSearchField()
+            search.tap()
+            search.typeText("MANGADEX")
+            XCTAssertTrue(toggle.waitForExistence(timeout: 10), app.debugDescription)
+            if (toggle.value as? String == "1") != enabled { toggle.switches.firstMatch.tap() }
+            XCTAssertEqual(toggle.value as? String, enabled ? "1" : "0")
+            attach("Source switches \(enabled)")
+            dismissSearch()
+            app.navigationBars.buttons.element(boundBy: 0).tap()
+        }
+        func searchBrowse() {
+            let field = searchField()
+            field.tap()
+            field.typeText("MANGADEX")
+        }
+        setMangaDex(true)
+        searchBrowse()
+        XCTAssertTrue(browseSource.waitForExistence(timeout: 30), app.debugDescription)
+        setMangaDex(false)
+        searchBrowse()
+        XCTAssertTrue(browseSource.waitForNonExistence(timeout: 10), "Disabled source should leave the browse list")
+        XCTAssertTrue(app.buttons["sources.manage"].waitForExistence(timeout: 10), app.debugDescription)
+        // A multilingual parser plugin starts with only some of its sources (system language) enabled.
+        dismissSearch()
+        app.buttons["sources.repositories"].tap()
+        XCTAssertTrue(tabs.waitForExistence(timeout: 30))
+        tabs.buttons["来源"].tap()
+        let header = app.descendants(matching: .any).matching(NSPredicate(format: "label MATCHES %@", ".*[0-9]+/[0-9]+.*")).firstMatch
+        XCTAssertTrue(header.waitForExistence(timeout: 10), app.debugDescription)
+        attach("Source groups")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        setMangaDex(true)
+        searchBrowse()
+        XCTAssertTrue(browseSource.waitForExistence(timeout: 10), app.debugDescription)
+        dismissSearch()
+        // Grid layout and a content-type filter.
+        resetBrowseFilters(app)
+        openBrowseMenu(app)
+        tapMenuItem(app, "网格")
+        tapMenuItem(app, "漫画")
+        dismissMenu(app)
+        let anyManga = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "source.MIHON_")).firstMatch
+        XCTAssertTrue(anyManga.waitForNonExistence(timeout: 10), "Hiding manga should hide manga sources")
+        attach("Browse grid without manga")
+        openBrowseMenu(app)
+        tapMenuItem(app, "漫画")
+        dismissMenu(app)
+        XCTAssertTrue(anyManga.waitForExistence(timeout: 10), app.debugDescription)
+        attach("Browse grid")
+        openBrowseMenu(app)
+        tapMenuItem(app, "列表")
+        dismissMenu(app)
+    }
+
     // MARK: - Helpers
 
     /// Filters the source list first: other sources (e.g. imported CMS sites) may push the row off screen, and
     /// lazy list rows that were never on screen do not exist for XCUITest.
     private func openFirstItem(source name: String, search: String? = nil) {
-        let field = app.searchFields.firstMatch
-        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        let field = searchField()
         field.tap()
         field.typeText(search ?? name)
         let source = app.buttons["source.\(name)"]
@@ -89,8 +722,7 @@ final class ExtensionEcosystemTests: XCTestCase {
     }
 
     private func openFirstChapter() {
-        let chapter = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "chapter.")).firstMatch
-        waitForEither(chapter, app.staticTexts["details.error"], timeout: 90)
+        let chapter = revealChapter(in: app, timeout: 90)
         XCTAssertTrue(chapter.exists, "Details failed: \(app.debugDescription)")
         attach("details")
         chapter.tap()
@@ -105,6 +737,35 @@ final class ExtensionEcosystemTests: XCTestCase {
         }, object: nil)
         wait(for: [started], timeout: 120)
         XCTAssertFalse(app.staticTexts["player.error"].exists, "Playback failed: \(app.debugDescription)")
+        XCTAssertTrue(playerControl(app, "player.close").exists, app.debugDescription)
+    }
+
+    private func selectReaderMode(_ mode: String) {
+        let more = app.buttons["reader.more"]
+        if !more.exists { app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap() }
+        XCTAssertTrue(more.waitForExistence(timeout: 5), app.debugDescription)
+        more.tap()
+        app.segmentedControls.buttons["布局"].tap()
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "阅读模式")).firstMatch.tap()
+        app.buttons[mode].tap()
+        app.buttons["reader.panel.close"].tap()
+        XCTAssertTrue(more.waitForExistence(timeout: 5))
+    }
+
+    private func dismissSearch() {
+        for title in ["关闭", "取消", "Cancel"] where app.buttons[title].firstMatch.exists {
+            app.buttons[title].firstMatch.tap(); return
+        }
+    }
+
+    /// The source list's search drawer hides once the list has scrolled; pull it back into view.
+    private func searchField() -> XCUIElement {
+        let field = app.pageSearchField()
+        for _ in 0..<4 where !field.waitForExistence(timeout: 3) {
+            app.collectionViews.firstMatch.swipeDown(velocity: .fast)
+        }
+        XCTAssertTrue(field.exists, app.debugDescription)
+        return field
     }
 
     private func element(_ identifier: String) -> XCUIElement { app.descendants(matching: .any)[identifier] }

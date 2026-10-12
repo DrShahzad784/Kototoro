@@ -1,5 +1,11 @@
 package org.skepsun.kototoro.parserhost
 
+import org.skepsun.kototoro.core.source.SourceBrowserSession
+
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+
+import okhttp3.Cookie
+
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -60,6 +66,7 @@ class ParserSourceRuntime(
             isPreferencesSupported = true,
             isCoverFetchingSupported = images != null,
             isChapterContentSupported = handle.info.source.contentType in TEXT_CONTENT_TYPES,
+            homepage = try { parser.domain.takeIf(String::isNotBlank)?.let { "https://$it" } } catch (_: Exception) { null },
         )
     }
 
@@ -135,6 +142,21 @@ class ParserSourceRuntime(
                     context.ensureActive()
                 }
             }
+        }
+
+    override suspend fun browserSession(sourceName: String): SourceBrowserSession = execute(sourceName) { handle ->
+        val domain = handle.parser.domain.takeIf(String::isNotBlank) ?: throw SourceOperationUnsupportedException()
+        val userAgent = runCatching { handle.parser.getRequestHeaders()["User-Agent"] }.getOrNull()
+        SourceBrowserSession("https://$domain", userAgent?.takeIf(String::isNotBlank) ?: platform.defaultUserAgent)
+    }
+
+    /** Parser requests share the platform's cookie jar, so the clearance reaches every parser of that site. */
+    override suspend fun importCookies(sourceName: String, url: String, cookies: List<String>): Int =
+        execute(sourceName) { _ ->
+            val httpUrl = url.toHttpUrlOrNull() ?: throw SourceInvalidArgumentException()
+            val parsed = cookies.mapNotNull { Cookie.parse(httpUrl, it) }
+            platform.cookieJar.saveFromResponse(httpUrl, parsed)
+            parsed.size
         }
 
     override suspend fun getPreferences(sourceName: String): SourcePreferenceScreen = execute(sourceName) { handle ->

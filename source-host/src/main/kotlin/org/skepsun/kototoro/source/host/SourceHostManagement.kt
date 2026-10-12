@@ -25,13 +25,18 @@ internal data class HostManagementResult(
 )
 @Serializable
 internal data class HostInstalled(val packageName: String, val versionCode: Long, val sha256: String, val ecosystem: String,
-    val bundled: Boolean = false)
+    val bundled: Boolean = false, val displayName: String = "", val versionName: String = "",
+    val sourceNames: List<String> = emptyList(), val languages: List<String> = emptyList(), val isAdult: Boolean = false,
+    /** Wire names of the sources this extension or plugin provides, so clients can manage them per extension. */
+    val sourceIds: List<String> = emptyList())
 
 /** App-owned immutable artifacts and atomic launch configuration; APK conversion runs on the embedding JVM. */
 internal class SourceHostManagement(
     private val directory: Path,
     private val initial: SourceHostConfig,
     private val registry: MihonJarRegistry,
+    private val pluginTitles: () -> Map<String, String> = { emptyMap() },
+    private val pluginSources: () -> Map<String, List<SourceRef>> = { emptyMap() },
     private val installPlugins: (List<SourceHostPlugin>, beforePublish: () -> Unit) -> Unit,
 ) {
     private val json = Json { ignoreUnknownKeys = false; encodeDefaults = true }
@@ -39,6 +44,12 @@ internal class SourceHostManagement(
     private var state = readInstalled(directory)
     private val seededPackages = initial.jars.map { it.identity.packageName }.toSet()
     private val seededPlugins = initial.plugins.map { it.id }.toSet()
+
+    init {
+        // No conversion runs before the first request: leftovers belong to a process that was stopped mid-install.
+        removeArtifacts { name -> (name.startsWith(".convert-") && name.endsWith(".tmp")) ||
+            (name.startsWith("conversion-") && name.endsWith(".jar")) }
+    }
 
     @Synchronized
     fun exchange(request: String): String {
@@ -50,11 +61,21 @@ internal class SourceHostManagement(
             "uninstall" -> uninstall(input)
             else -> error("Unknown management operation")
         }
+        if (input.operation != "list") pruneArtifacts()
         return json.encodeToString(HostManagementResult(installed = registry.installed().map {
             HostInstalled(it.metadata.packageName, it.metadata.versionCode, it.metadata.sha256, it.metadata.ecosystem.name,
-                it.metadata.packageName in seededPackages)
-        } + mergedPlugins(state).map { HostInstalled(it.id, it.versionCode, it.sha256.orEmpty(), "JAR", it.id in seededPlugins) },
-            sourceTitles = registry.installed().flatMap { it.sources }.associate { it.source.name to it.displayName }))
+                it.metadata.packageName in seededPackages, it.metadata.displayName, it.metadata.versionName,
+                it.sources.map { source -> source.displayName }, it.sources.map { source -> source.source.locale }.distinct(),
+                it.metadata.isNsfw, it.sources.map { source -> source.source.name })
+        } + mergedPlugins(state).let { plugins ->
+            val sources = pluginSources()
+            plugins.map {
+                val provided = sources[it.id].orEmpty()
+                HostInstalled(it.id, it.versionCode, it.sha256.orEmpty(), "JAR", it.id in seededPlugins,
+                    languages = provided.map { source -> source.locale }.distinct(), sourceIds = provided.map { source -> source.name })
+            }
+        },
+            sourceTitles = pluginTitles() + registry.installed().flatMap { it.sources }.associate { it.source.name to it.displayName }))
     }
 
     private fun install(input: HostManagementRequest) {
@@ -112,6 +133,28 @@ internal class SourceHostManagement(
             require(input.packageName !in seededPackages) { "Bundled extension cannot be removed" }
             val next = state.copy(jars = state.jars.filterNot { it.identity.packageName == input.packageName })
             persist(next); registry.unload(input.packageName); state = next
+        }
+    }
+
+    /**
+     * Converted artifacts are named by their hash, but DEX conversion is not byte-stable, so every reinstall of the
+     * same plugin wrote another multi-megabyte copy. Keep only what the install record (or the seed) references.
+     */
+    private fun pruneArtifacts() {
+        val referenced = (state.jars.map { it.path } + state.plugins.map { it.path } +
+            initial.jars.map { it.path } + initial.plugins.map { it.path })
+            .mapNotNull { resolveInstalledPath(directory, it).fileName?.toString() }.toSet()
+        removeArtifacts { name -> name.endsWith(".jar") && !name.startsWith("conversion-") && name !in referenced }
+    }
+
+    private fun removeArtifacts(stale: (String) -> Boolean) {
+        val artifacts = directory.resolve("extensions")
+        if (!Files.isDirectory(artifacts)) return
+        val files = Files.list(artifacts).use { it.toList() }
+        for (file in files) {
+            if (!Files.isRegularFile(file) || !stale(file.fileName.toString())) continue
+            // A retired runtime may still read an old artifact; where the OS refuses the delete, try next time.
+            try { Files.deleteIfExists(file) } catch (_: java.io.IOException) {}
         }
     }
 

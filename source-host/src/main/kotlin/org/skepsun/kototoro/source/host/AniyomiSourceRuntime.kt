@@ -13,6 +13,7 @@ import org.skepsun.kototoro.core.source.MihonModelRules
 import org.skepsun.kototoro.core.source.SourceChapter
 import org.skepsun.kototoro.core.source.SourceContent
 import org.skepsun.kototoro.core.source.SourceCoverArtifact
+import org.skepsun.kototoro.core.source.SourceBrowserSession
 import org.skepsun.kototoro.core.source.SourceDescriptor
 import org.skepsun.kototoro.core.source.SourceDetailsFetchMode
 import org.skepsun.kototoro.core.source.SourceDynamicFilters
@@ -77,6 +78,7 @@ class AniyomiSourceRuntime @JvmOverloads constructor(
             isPreferencesSupported = preferenceContext != null && (MihonNativePreferences.supports(lease, abi) || isHttp(lease)),
             isCoverFetchingSupported = imageStore != null && isHttp(lease),
             isChapterContentSupported = false,
+            homepage = homepage(lease),
         )
     }
 
@@ -90,6 +92,17 @@ class AniyomiSourceRuntime @JvmOverloads constructor(
     }
 
     /** `ConfigurableAnimeSource.setupPreferenceScreen` through the same native-control bridge as Mihon sources. */
+    override suspend fun browserSession(sourceName: String): SourceBrowserSession = execute(sourceName) { lease, _ ->
+        if (!isHttp(lease)) throw SourceOperationUnsupportedException()
+        HostBrowser.session(lease.instance)
+    }
+
+    override suspend fun importCookies(sourceName: String, url: String, cookies: List<String>): Int =
+        execute(sourceName) { lease, _ ->
+            if (!isHttp(lease)) throw SourceOperationUnsupportedException()
+            HostBrowser.importCookies(lease.instance, url, cookies)
+        }
+
     override suspend fun getPreferences(sourceName: String): SourcePreferenceScreen = execute(sourceName) { lease, session ->
         val context = preferenceContext ?: throw SourceOperationUnsupportedException()
         val configurable = MihonNativePreferences.supports(lease, abi)
@@ -103,9 +116,9 @@ class AniyomiSourceRuntime @JvmOverloads constructor(
         sourceName: String, revision: String, nodeId: String, value: SourcePreferenceValue,
     ): SourcePreferenceUpdate = execute(sourceName) { lease, session ->
         val context = preferenceContext ?: throw SourceOperationUnsupportedException()
-        if (nodeId == HostUserAgent.NODE_ID) {
+        if (nodeId in HostUserAgent.HOST_NODES) {
             if (!isHttp(lease)) throw SourceOperationUnsupportedException()
-            val status = HostUserAgent.update(lease, context, value)
+            val status = HostUserAgent.update(lease, context, value, nodeId)
             return@execute SourcePreferenceUpdate(status, HostUserAgent.screen(lease, context, true, session.preferences))
         }
         if (!MihonNativePreferences.supports(lease, abi)) throw SourceOperationUnsupportedException()
@@ -219,15 +232,16 @@ class AniyomiSourceRuntime @JvmOverloads constructor(
     override suspend fun getPageUrl(page: SourcePage): String = page.url
 
     override suspend fun fetchCover(content: SourceContent, large: Boolean): SourceCoverArtifact =
-        execute(content.source.name) { lease, session ->
-            val store = imageStore ?: throw SourceOperationUnsupportedException()
-            if (!isHttp(lease)) throw SourceOperationUnsupportedException()
-            val url = (if (large) content.largeCoverUrl ?: content.coverUrl else content.coverUrl)
-                ?.takeIf(String::isNotBlank) ?: throw SourceInvalidArgumentException()
-            val finished = CompletableDeferred<Unit>()
-            session.execution.pendingCall = finished
-            val response = MihonHttpCall.await(lease, coverRequest(lease, url)) { finished.complete(Unit) }
-            response.use { it.materializeCover(store, content.id) }
+        // Covers bypass the per-source call order like Mihon's (see MihonSourceRuntime.fetch).
+        withContext(Dispatchers.IO) {
+            registry.withSourceSuspending(content.source.name) { lease ->
+                val store = imageStore ?: throw SourceOperationUnsupportedException()
+                if (!isHttp(lease)) throw SourceOperationUnsupportedException()
+                val url = (if (large) content.largeCoverUrl ?: content.coverUrl else content.coverUrl)
+                    ?.takeIf(String::isNotBlank) ?: throw SourceInvalidArgumentException()
+                val response = MihonHttpCall.await(lease, coverRequest(lease, url)) {}
+                response.use { it.materializeCover(store, content.id) }
+            }
         }
 
     /** The source's own headers on a GET of the cover, with the Referer rule the other ecosystems use. */
@@ -264,6 +278,10 @@ class AniyomiSourceRuntime @JvmOverloads constructor(
             block()
         } else throw error
     }
+
+    private fun homepage(lease: MihonJarRegistry.SourceLease): String? = if (!isHttp(lease)) null else try {
+        (lease.instance.javaClass.getMethod("getBaseUrl").invoke(lease.instance) as? String)?.takeIf(String::isNotBlank)
+    } catch (_: Exception) { null }
 
     private fun isHttp(lease: MihonJarRegistry.SourceLease): Boolean = try {
         Class.forName("eu.kanade.tachiyomi.animesource.online.AnimeHttpSource", false, lease.loader).isInstance(lease.instance)

@@ -94,7 +94,8 @@ class MihonIosPlatform : SourceHostPreferenceUiPlatform, SourceHostRuntimePlatfo
         val helper = try { koin.koin.get<NetworkHelper>() } finally {
             ownedCookies = CookieHandler.getDefault().takeUnless { it === previousCookies }
         }
-        client = helper.client
+        // Kototoro's per-source domain setting reaches extensions whose address R8 folded into a constant.
+        client = installDomainRewrite(helper)
         return javaClass.classLoader
     }
 
@@ -113,13 +114,49 @@ class MihonIosPlatform : SourceHostPreferenceUiPlatform, SourceHostRuntimePlatfo
         )
         val registry = ParserPluginRegistry(parsers)
         try {
-            for (plugin in plugins) registry.load(Path.of(plugin.path), plugin.id, plugin.sha256)
+            for (plugin in plugins) {
+                val start = System.nanoTime()
+                registry.load(Path.of(plugin.path), plugin.id, plugin.sha256)
+                System.err.println("[source-host] plugin ${plugin.id}: ${(System.nanoTime() - start) / 1_000_000} ms")
+            }
         } catch (failure: Throwable) {
             try { registry.close() } catch (cleanup: Throwable) { failure.addSuppressed(cleanup) }
             throw failure
         }
         val runtime = ParserSourceRuntime(registry, parsers, images)
-        return SourceHostRuntimes(listOf(RoutedSourceRuntime.Route(registry::owns, runtime)), registry)
+        return SourceHostRuntimes(
+            routes = listOf(RoutedSourceRuntime.Route(registry::owns, runtime)),
+            titles = { registry.sources().associate { it.source.name to it.title } },
+            sources = { registry.installed().associate { plugin -> plugin.id to plugin.sources.map { it.source } } },
+            update = { next, publish -> updatePlugins(registry, next, publish) },
+            owner = registry,
+        )
+    }
+
+    /**
+     * One install or uninstall at a time: the changed plugin is built and validated before [publish] persists the
+     * record, then swapped in; the other loaded plugins are untouched. Anything larger reopens all runtimes.
+     */
+    private fun updatePlugins(registry: ParserPluginRegistry, next: List<SourceHostPlugin>, publish: () -> Unit): Boolean {
+        val loaded = registry.installed().associateBy { it.id }
+        val wanted = next.associateBy { it.id }
+        val removed = loaded.keys - wanted.keys
+        val changed = next.filter { loaded[it.id]?.metadata?.sha256 != it.sha256 }
+        when {
+            changed.size == 1 && removed.isEmpty() -> {
+                val plugin = changed.single()
+                val start = System.nanoTime()
+                registry.replace(Path.of(plugin.path), plugin.id, plugin.sha256) { publish() }
+                System.err.println("[source-host] plugin ${plugin.id} (incremental): ${(System.nanoTime() - start) / 1_000_000} ms")
+            }
+            changed.isEmpty() && removed.isNotEmpty() -> {
+                publish()
+                removed.forEach(registry::unload)
+            }
+            changed.isEmpty() -> publish()
+            else -> return false
+        }
+        return true
     }
 
     @Synchronized
@@ -132,6 +169,7 @@ class MihonIosPlatform : SourceHostPreferenceUiPlatform, SourceHostRuntimePlatfo
                 if (failure == null) failure = error else failure.addSuppressed(error)
             }
         }
+        org.skepsun.kototoro.source.host.HostDomainRewrites.installed = false
         client?.let {
             release { it.dispatcher.cancelAll() }
             release { it.connectionPool.evictAll() }

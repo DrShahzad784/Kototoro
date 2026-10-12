@@ -20,6 +20,11 @@ class RoutedSourceRuntime(private val routeProvider: () -> List<Route>) : Source
 
     override suspend fun getDynamicFilters(sourceName: String) = route(sourceName).getDynamicFilters(sourceName)
 
+    override suspend fun browserSession(sourceName: String) = route(sourceName).browserSession(sourceName)
+
+    override suspend fun importCookies(sourceName: String, url: String, cookies: List<String>) =
+        route(sourceName).importCookies(sourceName, url, cookies)
+
     override suspend fun getPreferences(sourceName: String) = route(sourceName).getPreferences(sourceName)
 
     override suspend fun updatePreference(

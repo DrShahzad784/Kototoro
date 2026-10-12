@@ -39,6 +39,15 @@ def generate():
     if not cover.exists():
         subprocess.run([ffmpeg, "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=300x450",
                         "-frames:v", "1", str(cover)], check=True)
+    # Distinct site identities over the same deterministic API, for source usage and ordering tests.
+    (ROOT / "usage-sites.json").write_text(json.dumps(usage_sites(), ensure_ascii=False), encoding="utf-8")
+
+
+def usage_sites(tag=""):
+    return {"sites": [
+        {"key": f"ios_usage_a_{tag}", "name": f"使用排序{tag}甲", "type": 1, "api": f"{BASE}/api.php/provide/vod/"},
+        {"key": f"ios_usage_b_{tag}", "name": f"使用排序{tag}乙", "type": 1, "api": f"{BASE}/api.php/provide/vod/"},
+    ]}
 
 
 def vod(vod_id, name, type_id, type_name, with_play):
@@ -66,6 +75,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         url = urllib.parse.urlsplit(self.path)
         if url.path == "/health":
             return self.reply({"ok": True})
+        if url.path == "/usage-sites.json":
+            tag = urllib.parse.parse_qs(url.query).get("run", [""])[0]
+            return self.reply(usage_sites(tag))
         if url.path == "/fail-page-2":
             PAGE_TWO_MODE = "fail"
             return self.reply({"ok": True})

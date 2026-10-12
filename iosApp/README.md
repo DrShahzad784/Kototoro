@@ -4,7 +4,7 @@
 其中列出调用链、生命周期约束、验证证据与后续工作入口。
 当前产品实施与验收状态见 [主要功能实施记录](../docs/architecture/ios-product-implementation-2026-10.md)。
 
-本模块已打通 SwiftUI 漫画库分类 → Kotlin/Native → 共享 Room v84 数据库，以及可选的
+本模块已打通 SwiftUI 作品库分类 → Kotlin/Native → 共享 Room v84 数据库，以及可选的
 SwiftUI → 共享源协议 → C/JNI → OpenJDK Mobile Zero → JVM source-host 源调用链。
 可选预览已支持列表 → 详情/封面 → 章节 → 图片阅读，以及前后翻页和同分支换章。
 `ios-shared` 是 iOS 平台装配层，复用 `core-db`、`core-domain`、`core-source`、`core-backup`、`core-net`
@@ -59,7 +59,12 @@ xcodebuild -project "iosApp/Kototoro.xcodeproj" -scheme "Kototoro" \
     -parallel-testing-enabled NO test
 ```
 
-Native 测试覆盖数据库重开、空标题拒绝和排序；XCTest 覆盖 SwiftUI 创建分类及应用重启后的读取。
+Native 测试覆盖数据库重开、空标题拒绝、分类排序／可见性及备份恢复；XCTest 覆盖 SwiftUI 分类操作及重启读取。
+来源“最近使用”读取共享使用时间，“使用频率”沿用 Android 的本地作品记录数，重复打开同一作品不累加。
+来源“新”标记读取共享加入版本；首次目录建立基线，之后新增来源记录 iOS 构建版本。
+`testNewSourceBadgesFilterAndRestartPreserveBaseline` 使用两次独立导入验证基线、新标记、列表／网格及筛选重启恢复。
+CMS fixture 的 `usage-sites.json?run=<标识>` 提供两个不同身份的测试站点，用于首次访问保持手动顺序和使用排序验收。
+修改服务脚本后需重启本地 fixture 服务，再运行相应用例。
 UI 测试每次创建唯一分类，测试数据留在测试设备沙盒中。
 
 如依赖下载失败，可给 Gradle 添加仓库约定的代理参数：
@@ -68,9 +73,10 @@ Xcode 构建阶段也会调用 Gradle，可用命令作用域内的 `JAVA_TOOL_O
 
 ## 苹果 CMS 影视源（默认构建）
 
-浏览页右上角"添加源"，粘贴苹果 CMS 接口（如 `https://…/api.php/provide/vod/`）或 TVBox 配置/多仓地址。
+浏览页右上角“仓库与扩展”，在添加仓库时选择“苹果 CMS / TVBox”，粘贴苹果 CMS 接口
+（如 `https://…/api.php/provide/vod/`）或 TVBox 配置/多仓地址。
 站点存入共享 `json_sources` 表（与 Android 同格式），由 `:source-tvbox` 在 Kotlin/Native 中执行，
-播放使用系统 `AVPlayerViewController`。type 3/4 爬虫站点与加密配置暂不支持。部署目标为 iOS 26。
+播放使用 `AVPlayer`／`AVPlayerLayer` 与原生自定义控制栏。type 3/4 爬虫站点与加密配置暂不支持。部署目标为 iOS 26。
 
 本机端到端测试先启动 fixture（需要 ffmpeg，产物在 ignored `iosApp/build/cms-fixture`），再运行 XCTest：
 
@@ -86,6 +92,27 @@ xcodebuild -project "iosApp/Kototoro.xcodeproj" -scheme Kototoro \
 
 真实站点（可选，依赖网络）：`TEST_RUNNER_KOTOTORO_REAL_CMS=<接口> xcodebuild … -only-testing:KototoroUITests/VideoSourceTests/testRealAppleCmsSitePlaysOnSimulator test`；
 批量探测：`./gradlew :source-tvbox:jvmTest --tests '*OnlineProbe*' -PtvboxOnlineList=<每行一个地址的文件> [-PtvboxProxy=127.0.0.1:7890]`。
+
+## 真机 IPA（本地侧载预览）
+
+应用图标位于 `Kototoro/Assets.xcassets/AppIcon.appiconset`，复用 Android 的 Kototoro 图标。
+真机必须使用 `iphoneos` JVM 切片；模拟器的 Arm64 静态库不能直接放进真机应用。
+已准备真实扩展预览后，可复用其 Java 模块、兼容库与来源配置：
+
+```bash
+python3 "iosApp/Scripts/build-jvm-preview.py" --platform iphoneos --profile "iosApp/build/jvm-real-api"
+xcodebuild -project "iosApp/Kototoro.xcodeproj" -scheme Kototoro \
+    -configuration Debug -sdk iphoneos -destination 'generic/platform=iOS' \
+    -derivedDataPath "iosApp/build/DeviceIPA" -archivePath "iosApp/build/Kototoro-Device.xcarchive" \
+    CODE_SIGNING_ALLOWED=NO KOTOTORO_JVM=1 \
+    "KOTOTORO_JVM_DIRECTORY=$(pwd)/iosApp/build/jvm-device" \
+    "KOTOTORO_JVM_LDFLAGS=$(pwd)/iosApp/build/jvm-device/libkototoro-jvm.a -lz -liconv -framework Security -framework SystemConfiguration" \
+    archive
+```
+
+将归档中的 `Products/Applications/Kototoro.app` 放入 ZIP 的 `Payload/Kototoro.app/`，文件扩展名为 `.ipa`。
+此命令生成未签名的 Debug 侧载预览，需要由侧载工具完成签名，最低 iOS 26。
+真机 Arm64 JVM、应用归档和图标编译已通过；真机安装、启动与扩展运行仍须在实际设备验收。
 
 ## 嵌入式 JVM 模拟器预览
 
@@ -116,6 +143,9 @@ xcodebuild -project "iosApp/Kototoro.xcodeproj" -scheme Kototoro \
 测试覆盖源枚举、真实 Java fixture 调用、应用终止/重启、详情/章节、图片解码、前后翻页、换章与返回导航。
 仍不是生态兼容性验收。
 不同预览使用各自的 DerivedData 目录。普通构建若复用含 JVM 产物的目录会明确拒绝，避免残留的第三方产物进入默认包。
+fixture 预览只包含自有测试 ABI，扩展管理会禁用真实扩展安装并说明原因。
+运行 fixture 测试后，继续真实扩展开发前务必重新安装并启动下节的 `RealApiPreview` 应用；
+否则 CopyManga、MH1234 等真实扩展会缺少 Mihon 接口而初始化失败。
 
 ## 真实扩展预览（Mihon / Tsundoku / Aniyomi / JAR）
 
@@ -168,6 +198,18 @@ APK 转换期间修复了 dex2jar 2.4.38 的 `java/util/Object` 公共父类型�
 支持 Mihon、Aniyomi、Tsundoku、JAR 仓库与 TVBox/CMS 地址，扩展转换与注册在当前移动 JVM 会话中执行。
 仓库、托管安装、收藏、历史、漫画／小说书签和阅读／播放进度会在重启后恢复；记录页支持手动检查收藏更新。
 
+扩展管理使用原生“扩展／仓库”分段列表。工具栏的“＋”添加仓库或从文件安装；
+支持名称／来源／语言搜索、生态与语言筛选、安装状态筛选与更新分区。
+语言筛选常驻在安装状态分段下方，支持多选和单独重置；勾选中文与英语时显示匹配任一种语言的扩展。
+菜单保持展开以便连续勾选；未选语言时显示全部，多来源扩展按包含的语言参与匹配。
+语言多选、生态与安装状态使用 `@AppStorage` 保存，返回页面或重启应用后恢复；添加／刷新仓库也保留选择。
+“重置”仅清空语言，“清除筛选”同时恢复语言、生态与安装状态的默认值，并保存重置结果。
+点击扩展行可查看版本、仓库及包含的来源；已安装扩展可重新安装或卸载，仓库支持刷新与移除。
+多仓库同包按生态分别合并并选择最高版本；单仓库详情显示其实际版本，并可安装该仓库提供的版本。
+仓库安装与文件导入直接使用已有设备转换和安装流程，运行时错误由实际操作反馈；仓库刷新期间可继续添加仓库。
+扩展名称优先采用扩展／仓库的可读名称，缺失时使用所含来源名称；已安装扩展的展示信息单独保存。
+仓库图标缓存到本地并缩小解码，仓库不可用或移除后保留已知图标；缺图时使用名称首字占位。
+
 确定性安装回归使用原始 APK，设备负责转换；本地测试服务器：
 
 ```bash
@@ -176,7 +218,15 @@ python3 "iosApp/Scripts/serve-repository-fixture.py"
 
 同时启动前述 CMS fixture 后，使用真实 JVM 预览构建参数运行
 `-only-testing:KototoroUITests/ProductFlowTests -collect-test-diagnostics never test`。
+同一仓库服务器提供 `/ui/repo.json` 浏览样本；默认构建的
+`RepositoryManagementTests` 验证添加失败后恢复、搜索、状态分段、仓库导航与扩展详情。
+`ExtensionPresentationTests` 独立覆盖版本合并、跨生态身份、旧 host 元数据、成人管理与筛选规则。
 漫画 fixture UI 回归也验证章节／更多面板、书签、下载、换章和重启续读。
+漫画下载使用应用级持久化队列：设置 → 下载，或阅读器的章节／更多 → 下载队列可暂停、继续和重试。
+退出阅读器后前台任务继续；进入后台暂停，进程中断的任务重启后等待手动继续。
+每页保存检查点，继续时校验已有图片，整章完成后发布离线清单；移除任务保留已下载文件。
+队列回归：`-only-testing:KototoroUITests/ReaderDownloadQueueTests`，测试实际生产队列的串行性、迟到回调、
+重启／失败恢复与文件写入失败。源请求已进入 JNI 后仍须等源超时或请求结束，当前暂停为页面边界上的协作取消。
 这些证据为 Apple Silicon 模拟器验证，不代表真机／发布包已验收。
 
 详情、章节与页对象在 Kotlin 内保留完整 `SourceContent` / `SourceChapter` / `SourcePage`，包括 opaque
@@ -201,7 +251,7 @@ xcodebuild -project "iosApp/Kototoro.xcodeproj" -scheme Kototoro \
 1. 在真实超长条漫源与真机内存压力下补充端到端阅读器性能验收。
 2. 接入 WKWebView、WebKit Cookie、JavaScript 与图形 native 桥，扩大代表源兼容验证。
 3. 补充真机 Zero 构建/启动、内存和代表源性能数据；模拟器测试不替代主方案 G0/G2。
-4. 完成运行时/兼容层的分发与许可证 S3 门槛，以及后台更新检测与下载队列调度。
+4. 完成运行时/兼容层的分发与许可证 S3 门槛，以及后台更新检测与系统后台下载调度。
 
 [上游 IOS_PORT.md](https://github.com/az4521/TachiyomiAZ/blob/master/IOS_PORT.md) 记录了 OpenJDK 模拟器
 切片对 `MAP_JIT`、W^X 与 `pthread_jit_write_protect_np` 的专用补丁；接入 JVM 时需要逐项核对。

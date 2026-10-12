@@ -8,8 +8,9 @@ if [[ "${KOTOTORO_JVM:-0}" != "1" ]]; then
     fi
     exit 0
 fi
-if [[ "${PLATFORM_NAME:-}" != "iphonesimulator" || "${CURRENT_ARCH:-arm64}" == "x86_64" ]]; then
-    echo "The local JVM preview currently supports only the arm64 iOS Simulator." >&2
+if [[ "${PLATFORM_NAME:-}" != "iphonesimulator" && "${PLATFORM_NAME:-}" != "iphoneos" ]] ||
+   [[ "${CURRENT_ARCH:-arm64}" == "x86_64" ]]; then
+    echo "The local JVM preview supports only arm64 iOS devices and simulators." >&2
     exit 1
 fi
 

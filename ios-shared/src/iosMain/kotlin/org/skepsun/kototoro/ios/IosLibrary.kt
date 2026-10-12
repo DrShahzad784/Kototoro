@@ -1,13 +1,17 @@
 package org.skepsun.kototoro.ios
 
 import androidx.room.Room
+import androidx.room.deferredTransaction
 import androidx.room.immediateTransaction
+import androidx.room.useReaderConnection
 import androidx.room.useWriterConnection
 import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import org.skepsun.kototoro.core.db.DATABASE_VERSION
 import org.skepsun.kototoro.core.db.MangaDatabase
+import org.skepsun.kototoro.core.db.entity.MangaSourceEntity
+import org.skepsun.kototoro.parsers.network.CloudFlareProtection
 import org.skepsun.kototoro.favourites.data.FavouriteCategoryEntity
 import org.skepsun.kototoro.list.domain.ListSortOrder
 import org.skepsun.kototoro.core.library.SourceLibrary
@@ -17,7 +21,17 @@ import org.skepsun.kototoro.core.source.SourceRef
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
-data class IosCategory(val id: Int, val title: String)
+data class IosCategory(val id: Int, val title: String, val isVisibleInLibrary: Boolean = true)
+
+data class IosSourceSetting(
+    val name: String,
+    val enabled: Boolean,
+    val pinned: Boolean,
+    val sortKey: Int,
+    val lastUsedAt: Long,
+    val storedContentCount: Int,
+    val addedIn: Int,
+)
 
 /** App-lifetime database owner. Swift supplies a persistent, app-private file path. */
 @OptIn(ExperimentalAtomicApi::class)
@@ -45,7 +59,27 @@ class IosLibrary {
 
     @Throws(Exception::class)
     suspend fun categories(): List<IosCategory> = database.getFavouriteCategoriesDao().findAll().map {
-        IosCategory(id = it.categoryId, title = it.title)
+        IosCategory(id = it.categoryId, title = it.title, isVisibleInLibrary = it.isVisibleInLibrary)
+    }
+
+    /** Saves the editor snapshot atomically; a changed category list must be reloaded before saving. */
+    @Throws(Exception::class)
+    suspend fun saveCategoryLayout(orderedIds: List<Int>, visibleIds: List<Int>) {
+        database.useWriterConnection { connection ->
+            connection.immediateTransaction {
+                val categories = database.getFavouriteCategoriesDao()
+                val currentIds = categories.findAll().map { it.categoryId }.toSet()
+                require(orderedIds.size == currentIds.size && orderedIds.toSet() == currentIds) {
+                    "分类列表已变化，请重新打开管理分类后保存"
+                }
+                val visible = visibleIds.toSet()
+                require(visible.all { it in currentIds }) { "Visible category no longer exists" }
+                orderedIds.forEachIndexed { index, id ->
+                    categories.updateSortKey(id.toLong(), index)
+                    categories.updateVisibility(id.toLong(), id in visible)
+                }
+            }
+        }
     }
 
     @Throws(Exception::class)
@@ -67,6 +101,111 @@ class IosLibrary {
                         deletedAt = 0,
                     ),
                 )
+            }
+        }
+    }
+
+    /** Renames a category, keeping its sort order, update tracking and shelf visibility. */
+    @Throws(Exception::class)
+    suspend fun renameCategory(id: Int, title: String) {
+        val normalized = title.trim()
+        require(normalized.isNotEmpty()) { "Category title must not be blank" }
+        val categories = database.getFavouriteCategoriesDao()
+        val current = categories.find(id)
+        categories.update(id.toLong(), normalized, current.order, current.track, current.isVisibleInLibrary)
+    }
+
+    /** As Android: the category and its favourite rows are removed; the works' other categories stay. */
+    @Throws(Exception::class)
+    suspend fun removeCategory(id: Int) {
+        database.useWriterConnection { connection ->
+            connection.immediateTransaction {
+                database.getFavouritesDao().deleteAll(id.toLong())
+                database.getFavouriteCategoriesDao().delete(id.toLong())
+                database.getChaptersDao().gc()
+            }
+        }
+    }
+
+    /** Sources the user switched on or off, in Android's `sources` table (and its backups); others use defaults. */
+    @Throws(Exception::class)
+    suspend fun sourceStates(): Map<String, Boolean> =
+        database.getSourcesDao().findAll().associate { it.source to it.isEnabled }
+
+    /** Every stored source row with Android's recent-use timestamp and stored-work popularity metric. */
+    @Throws(Exception::class)
+    suspend fun sourceSettings(): List<IosSourceSetting> = database.useReaderConnection { connection ->
+        connection.deferredTransaction {
+            val dao = database.getSourcesDao()
+            val counts = dao.findUsageCounts().associate { it.source to it.contentCount }
+            dao.findAll().map {
+                IosSourceSetting(it.source, it.isEnabled, it.isPinned, it.sortKey, it.lastUsedAt,
+                    counts[it.source] ?: 0, it.addedIn)
+            }
+        }
+    }
+
+    /** Registers catalog additions once; the first iOS catalog establishes a baseline without new-source badges. */
+    @Throws(Exception::class)
+    suspend fun registerSourceCatalog(names: List<String>, enabled: List<Boolean>, appVersion: Int, baseline: Boolean) {
+        require(appVersion > 0 && names.size == enabled.size && names.distinct().size == names.size)
+        require(names.all { it.isNotBlank() })
+        database.useWriterConnection { connection ->
+            connection.immediateTransaction {
+                val dao = database.getSourcesDao()
+                val known = dao.findAll().mapTo(HashSet()) { it.source }
+                var position = dao.getMaxSortKey()
+                dao.insertIfAbsent(names.mapIndexedNotNull { index, name ->
+                    if (name in known) null else MangaSourceEntity(name, enabled[index], ++position,
+                        if (baseline) 0 else appVersion, 0, false, CloudFlareProtection.NOT_DETECTED)
+                })
+            }
+        }
+    }
+
+    /** Visiting a source records usage without changing its switch, pin or manual position. */
+    @Throws(Exception::class)
+    suspend fun recordSourceUsage(name: String, enabled: Boolean) {
+        require(name.isNotBlank())
+        database.useWriterConnection { connection ->
+            connection.immediateTransaction {
+                val dao = database.getSourcesDao()
+                dao.insertIfAbsent(listOf(MangaSourceEntity(name, enabled, dao.getMaxSortKey() + 1,
+                    SOURCE_APP_VERSION, 0, false, CloudFlareProtection.NOT_DETECTED)))
+                dao.setLastUsed(name, kotlin.time.Clock.System.now().toEpochMilliseconds())
+            }
+        }
+    }
+
+    @Throws(Exception::class)
+    suspend fun setSourcePinned(name: String, pinned: Boolean) =
+        database.getSourcesDao().setPinned(name, pinned, SOURCE_APP_VERSION)
+
+    /**
+     * Saves a manual order. Sources without a row yet get one carrying [enabled] (their current effective state),
+     * so ordering never changes which sources are switched on.
+     */
+    @Throws(Exception::class)
+    suspend fun setSourceOrder(names: List<String>, enabled: List<Boolean>) {
+        require(names.size == enabled.size && names.distinct().size == names.size)
+        database.useWriterConnection { connection ->
+            connection.immediateTransaction {
+                val dao = database.getSourcesDao()
+                dao.insertIfAbsent(names.mapIndexed { index, name ->
+                    MangaSourceEntity(name, enabled[index], index, SOURCE_APP_VERSION, 0, false,
+                        CloudFlareProtection.NOT_DETECTED)
+                })
+                names.forEachIndexed { index, name -> dao.setSortKey(name, index) }
+            }
+        }
+    }
+
+    @Throws(Exception::class)
+    suspend fun setSourcesEnabled(names: List<String>, enabled: Boolean) {
+        database.useWriterConnection { connection ->
+            connection.immediateTransaction {
+                val dao = database.getSourcesDao()
+                for (name in names.distinct()) dao.setEnabled(name, enabled, SOURCE_APP_VERSION)
             }
         }
     }
@@ -152,5 +291,39 @@ class IosLibrary {
     suspend fun markUpdateRead(content: IosSourceContent) = SourceTracker(database, records,
         { it }, { it.chapters?.firstOrNull()?.branch }).markRead(content.value.id)
 
+    private val backups by lazy { IosBackupService(this) }
+
+    /** Verifies the whole archive and counts restorable rows; nothing is written yet. */
+    @Throws(Exception::class)
+    suspend fun previewBackup(path: String): IosBackupPreview = backups.preview(path)
+
+    /** Merges in one transaction; local rows are never cleared and newer local state wins. */
+    @Throws(Exception::class)
+    suspend fun restoreBackup(preview: IosBackupPreview): Int = backups.restore(preview)
+
+    /** Writes the Android-compatible library sections; [path] must not exist yet. */
+    @Throws(Exception::class)
+    suspend fun exportBackup(path: String) = backups.export(path, kotlin.time.Clock.System.now().toEpochMilliseconds())
+
+    private val externalBackups by lazy { IosExternalBackupService(this) }
+
+    /** Kototoro / Kotatsu archives restore through [previewBackup]; everything else is another app's backup. */
+    fun isKototoroBackup(path: String): Boolean = externalBackups.isKototoroBackup(path)
+
+    /** Decodes a Mihon/Tachiyomi, Aniyomi or Venera backup and counts what it would import. */
+    @Throws(Exception::class)
+    suspend fun previewExternalBackup(path: String): IosExternalBackupPreview = externalBackups.preview(path)
+
+    /**
+     * Imports with Android's rules: [sources] are the installed ones (for Venera name matching and to tell which
+     * extensions still need installing); works of missing extensions are kept under their original keys.
+     */
+    @Throws(Exception::class)
+    suspend fun importExternalBackup(preview: IosExternalBackupPreview, sources: List<IosSource>): IosExternalImportResult =
+        externalBackups.import(preview, sources)
+
     fun close() = database.close()
 }
+
+/** `added_in` for sources first seen on iOS; Android's "new sources" hint compares it with its own version code. */
+private const val SOURCE_APP_VERSION = 0

@@ -38,7 +38,12 @@ dependencies {
     implementation project(':parser-host')
     implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:${libs.versions.coroutines.get()}"
     compileOnly apis
+    testImplementation apis
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.8.2'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.8.2'
 }
+
+tasks.withType(Test).configureEach { useJUnitPlatform() }
 
 tasks.register('stagePreview', Sync) {
     dependsOn tasks.named('jar')

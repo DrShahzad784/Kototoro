@@ -151,4 +151,6 @@ data class SourceDescriptor(
     val isCoverFetchingSupported: Boolean = false,
     /** The source can return a chapter as text (novels) through [SourceRuntime.getChapterContent]. */
     val isChapterContentSupported: Boolean = false,
+    /** The site's base address for presentation (source icon); null when the runtime has none. */
+    val homepage: String? = null,
 )

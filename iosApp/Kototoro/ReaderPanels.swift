@@ -3,6 +3,7 @@ import SwiftUI
 
 struct ReaderChapterPanel: View {
     @ObservedObject var model: SourceReaderModel
+    @EnvironmentObject private var downloads: ReaderDownloadQueue
     let onJump: (Int) -> Void
     let onChapter: (IosSourceChapter) -> Void
     @State private var tab = 0
@@ -18,6 +19,7 @@ struct ReaderChapterPanel: View {
     @State private var status: String?
     @State private var busy = false
     @State private var expandedVolumes: Set<Int32> = []
+    @State private var showingDownloads = false
 
     private var branches: [String] { Array(Set(model.content.chapters.compactMap(\.branch))).sorted() }
     private var chapters: [IosSourceChapter] {
@@ -113,6 +115,8 @@ struct ReaderChapterPanel: View {
                 }
             }
             if let status { Text(status).font(.caption).padding(.horizontal, 12) }
+            Button("下载队列", systemImage: "arrow.down.circle") { showingDownloads = true }
+                .accessibilityIdentifier("reader.downloads")
             if selecting {
                 HStack {
                     Button("全选") { selection = Set(chapters.map(\.id)) }
@@ -130,6 +134,7 @@ struct ReaderChapterPanel: View {
         }
         .task { branch = model.chapter.branch; expandedVolumes.insert(model.chapter.volume); await model.refreshBookmarks() }
         .onChange(of: tab) { _, _ in query = ""; selecting = false; selection = [] }
+        .sheet(isPresented: $showingDownloads) { ReaderDownloadsSheet() }
     }
 
     private func chapterButton(_ chapter: IosSourceChapter) -> some View {
@@ -151,14 +156,30 @@ struct ReaderChapterPanel: View {
 
     private func batch(download: Bool) {
         let selected = chapters.filter { selection.contains($0.id) }
+        if download {
+            do {
+                try downloads.enqueue(content: model.content, chapters: selected)
+                status = "已加入下载队列，共 \(selected.count) 章"
+            } catch { status = error.localizedDescription }
+            return
+        }
         busy = true
         Task {
             var done = 0
             do {
                 for chapter in selected {
                     status = "\(download ? "下载" : "移除") \(done + 1)/\(selected.count)"
-                    if download { try await ReaderDownloads.download(runtime: model.runtime, content: model.content, chapter: chapter) }
-                    else { try ReaderDownloads.remove(content: model.content, chapter: chapter) }
+                    // A removed task can still own a finishing JNI request; do not delete its destination yet.
+                    guard !downloads.isFinishing(content: model.content, chapter: chapter) else {
+                        if let entry = downloads.entry(content: model.content, chapter: chapter) { try downloads.pause(entry.id) }
+                        status = "已暂停下载，请待当前请求结束后移除下载"
+                        busy = false
+                        return
+                    }
+                    if let entry = downloads.entry(content: model.content, chapter: chapter) {
+                        try downloads.remove(entry.id)
+                    }
+                    try ReaderDownloads.remove(content: model.content, chapter: chapter)
                     done += 1
                 }
                 status = "完成 \(done) 章"
@@ -207,11 +228,14 @@ struct ReaderMorePanel: View {
                             }
                         }
                         if let status { Text(status).font(.caption).foregroundStyle(.secondary) }
+                        Button("下载队列", systemImage: "arrow.down.circle") { onAction("downloads") }
+                            .accessibilityIdentifier("reader.downloads")
                         LabeledContent("自动翻页速度") { Slider(value: $settings.value.autoSpeed, in: 0.01...1).frame(width: 140) }
                     } else if section == 1 {
                         Picker("阅读模式", selection: $settings.value.mode) {
-                            Text("向右分页").tag(0); Text("向左分页").tag(1); Text("垂直分页").tag(2)
-                            Text("垂直连续").tag(3); Text("水平连续").tag(4)
+                            // Android's reader mode names: STANDARD, REVERSED, VERTICAL, WEBTOON, CONTINUOUS_HORIZONTAL.
+                            Text("默认（从左到右）").tag(0); Text("从右到左").tag(1); Text("从上到下").tag(2)
+                            Text("条漫").tag(3); Text("横向条漫（连续）").tag(4)
                         }
                         Picker("缩放基准", selection: $settings.value.fit) {
                             Text("适应页面").tag(0); Text("适应宽度").tag(1); Text("适应高度").tag(2); Text("保持起始位置").tag(3)
@@ -222,7 +246,10 @@ struct ReaderMorePanel: View {
                             .disabled(settings.value.mode >= 3 || settings.value.doublePage)
                         Toggle("自动裁切白边", isOn: $settings.value.cropMargins)
                         Picker("翻页效果", selection: Binding(get: { settings.value.animation }, set: { settings.value.animation = $0 })) {
-                            Text("无动画").tag(0); Text("滑动").tag(1); Text("淡入淡出").tag(2); Text("缩放").tag(3)
+                            // Stored values stay stable: Android's ADVANCED (cover) and SIMULATION (curl) follow the
+                            // fade and scale effects iOS already had.
+                            Text("禁用").tag(0); Text("默认").tag(1); Text("淡入淡出").tag(2); Text("缩放").tag(3)
+                            Text("高级").tag(4); Text("仿真").tag(5)
                         }.disabled(settings.value.mode >= 3)
                     } else if section == 2 {
                         Picker("背景", selection: $settings.value.background) {
@@ -248,6 +275,11 @@ struct ReaderMorePanel: View {
                                         settings.value.floatingActions.filter { $0 != "bookmark" }.count + (settings.value.bookmarkButton ? 1 : 0) >= 4)
                         }
                         Toggle("从底部展开面板", isOn: $settings.value.bottomPanels)
+                        Toggle("点击屏幕边缘翻页", isOn: $settings.value.tapZones)
+                            .accessibilityIdentifier("reader.option.tapZones")
+                        Toggle("反转点击区域", isOn: $settings.value.reverseTaps).disabled(!settings.value.tapZones)
+                        Text("左右两侧或上下边缘翻页，中间显示或隐藏控件；双击缩放，双指捏合缩放。")
+                            .font(.caption).foregroundStyle(.secondary)
                         Button(savedDefault ? "已设为全局默认" : "将当前设置设为全局默认") {
                             settings.saveAsDefault(); savedDefault = true
                         }.buttonStyle(.glass)

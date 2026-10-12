@@ -21,6 +21,20 @@ final class RepositoryLinkTests: XCTestCase {
         XCTAssertEqual(parsed.url.absoluteString, "https://example.org/feed?a=1&b=%2F")
     }
 
+    /// Repositories' own pages still link with the Tachiyomi/Aniyomi schemes; Android infers the kind from them.
+    func testLegacySchemesImplyTheirKind() throws {
+        let address = "https://raw.githubusercontent.com/LittleSurvival/copymanga-copy20/repo/index.min.json"
+        let encoded = address.addingPercentEncoding(withAllowedCharacters: .alphanumerics)!
+        for (scheme, kind) in [("tachiyomi", "MIHON"), ("aniyomi", "ANIYOMI"), ("anikku", "ANIYOMI"), ("kototoro", "MIHON")] {
+            let parsed = try RepositoryLink.parse("\(scheme)://add-repo?url=\(encoded)", defaultKind: "JAR")
+            XCTAssertEqual(parsed.kind, kind, scheme)
+            XCTAssertEqual(parsed.url.absoluteString, address)
+        }
+        // An explicit kind still wins over the scheme.
+        XCTAssertEqual(try RepositoryLink.parse("tachiyomi://add-repo?url=\(encoded)&kind=tsundoku", defaultKind: "MIHON").kind,
+                       "TSUNDOKU")
+    }
+
     func testMalformedAndUnsupportedLinksFailBeforeImport() {
         for link in [
             "kototoro://add-repo?url=https://example.org&kind=MIHON&kind=JAR",

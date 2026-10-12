@@ -9,6 +9,8 @@ class IosLibraryEntry internal constructor(value: SourceLibraryEntry) {
     val updatedAt = value.updatedAt
     val progress = value.progressPercent ?: 0f
     val hasProgress = value.progressPercent != null
+    /** History only: the chapter last read, named like the chapter list does. */
+    val lastChapterTitle: String? = value.lastChapter?.let { it.title.takeIf(String::isNotBlank) ?: "第 ${chapterNumber(it.number)} 话" }
 }
 
 data class IosReadingPosition(val chapterId: String, val index: Int, val scroll: Float, val progress: Float)

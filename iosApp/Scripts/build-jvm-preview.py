@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Build the arm64 simulator preview in ignored build directories; no global installation or Git operations."""
+"""Build an arm64 iOS preview in ignored build directories; no global installation or Git operations."""
+import argparse
 import hashlib
 import json
 import os
@@ -62,6 +63,18 @@ def build_tool(name, archive_name, env):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--platform", choices=["iphonesimulator", "iphoneos"], default="iphonesimulator")
+    parser.add_argument("--profile", type=Path, help="Reuse an already staged runtime's Java libraries and sources")
+    arguments = parser.parse_args()
+    simulator = arguments.platform == "iphonesimulator"
+    output = OUTPUT if simulator else APP / "build/jvm-device"
+    output.mkdir(parents=True, exist_ok=True)
+    profile = arguments.profile.resolve() if arguments.profile else None
+    if profile:
+        for required in ["java_bundle/lib/modules", "lib", "sources/config.json"]:
+            if not (profile / required).exists():
+                raise RuntimeError("Missing runtime profile artifact: " + str(profile / required))
     if os.uname().sysname != "Darwin" or os.uname().machine != "arm64":
         raise RuntimeError("An Apple Silicon Mac with Xcode is required")
     java = os.environ.get("KOTOTORO_JVM_BOOT_JDK") or subprocess.check_output(
@@ -101,15 +114,19 @@ def main():
     if stamp.read_text() != patch_version:
         raise RuntimeError("Source patch revision differs from the current pins")
 
-    support = WORK / "libffi"
-    with zipfile.ZipFile(download("libffi.zip")) as archive:
+    support = WORK / ("libffi" if simulator else "libffi-device")
+    with zipfile.ZipFile(download("libffi.zip" if simulator else "libffi-device.zip")) as archive:
         archive.extractall(support)
-    ffi = WORK / "libffi-arm64.a"
-    run(["xcrun", "lipo", "-thin", "arm64", support / "libffi.a", "-output", ffi])
-    sdk = subprocess.check_output(["xcrun", "--sdk", "iphonesimulator", "--show-sdk-path"], text=True).strip()
+    ffi = WORK / ("libffi-arm64.a" if simulator else "libffi-device-arm64.a")
+    if simulator:
+        run(["xcrun", "lipo", "-thin", "arm64", support / "libffi.a", "-output", ffi])
+    else:
+        shutil.copy2(support / "libffi.a", ffi)
+    sdk = subprocess.check_output(["xcrun", "--sdk", arguments.platform, "--show-sdk-path"], text=True).strip()
     mac_sdk = subprocess.check_output(["xcrun", "--sdk", "macosx", "--show-sdk-path"], text=True).strip()
-    conf = "iossim-aarch64-zero-release"
-    flags = "-target arm64-apple-ios17.0-simulator -mios-simulator-version-min=17.0"
+    conf = "iossim-aarch64-zero-release" if simulator else "ios-aarch64-zero-release"
+    flags = ("-target arm64-apple-ios17.0-simulator -mios-simulator-version-min=17.0" if simulator else
+             "-target arm64-apple-ios17.0 -miphoneos-version-min=17.0")
     run(["bash", "configure", "--with-jobs=4", "--with-conf-name=" + conf, "--disable-warnings-as-errors",
          "--openjdk-target=aarch64-macos-ios", "--with-sysroot=" + sdk,
          "--with-libffi-include=" + str(support / "include/ffi"), "--with-libffi-lib=" + str(support),
@@ -118,10 +135,18 @@ def main():
     run(["make", "LOG=info", "CONF=" + conf, "static-libs-image"], cwd=mobile, env=env)
     build = mobile / "build" / conf
     libraries = build / "images/static-libs/lib"
-    run(["libtool", "-static", "-o", OUTPUT / "libkototoro-jvm.a", libraries / "zero/libjvm.a", ffi] +
+    run(["libtool", "-static", "-o", output / "libkototoro-jvm.a", libraries / "zero/libjvm.a", ffi] +
         [libraries / name for name in ["libverify.a", "libjava.a", "libzip.a", "libnet.a", "libnio.a", "libjimage.a"]])
-    shutil.copytree(build / "jdk/include", OUTPUT / "include", dirs_exist_ok=True)
-    shutil.copytree(build / "jdk/include/ios", OUTPUT / "include", dirs_exist_ok=True)
+    shutil.copytree(build / "jdk/include", output / "include", dirs_exist_ok=True)
+    shutil.copytree(build / "jdk/include/ios", output / "include", dirs_exist_ok=True)
+
+    if profile:
+        for name in ["java_bundle", "lib", "sources"]:
+            shutil.copytree(profile / name, output / name, dirs_exist_ok=True)
+        if (profile / "boot-shims.jar").exists():
+            shutil.copy2(profile / "boot-shims.jar", output / "boot-shims.jar")
+        print(arguments.platform + " JVM preview ready:", output, flush=True)
+        return
 
     # The pinned release has the matching Java 26 module image. Copy its module data and legal notices only.
     with zipfile.ZipFile(download("runtime.ipa")) as archive:
@@ -129,20 +154,20 @@ def main():
             if "/java_bundle/" not in name or name.endswith("/"):
                 continue
             suffix = name.split("/java_bundle/", 1)[1]
-            target = OUTPUT / "java_bundle" / suffix
-            if not target.resolve().is_relative_to(OUTPUT):
+            target = output / "java_bundle" / suffix
+            if not target.resolve().is_relative_to(output):
                 raise RuntimeError("Unsafe runtime path")
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(archive.read(name))
     run([ROOT / "gradlew", ":source-host:installDist", ":source-host:exportEmbeddedFixture", "--no-daemon"], cwd=ROOT, env=env)
-    shutil.copytree(ROOT / "source-host/build/install/source-host/lib", OUTPUT / "lib", dirs_exist_ok=True)
+    shutil.copytree(ROOT / "source-host/build/install/source-host/lib", output / "lib", dirs_exist_ok=True)
     fixture = ROOT / "source-host/build/embedded-fixture"
-    shutil.copy2(fixture / "fixture-api.jar", OUTPUT / "lib/fixture-api.jar")
-    (OUTPUT / "sources").mkdir(exist_ok=True)
+    shutil.copy2(fixture / "fixture-api.jar", output / "lib/fixture-api.jar")
+    (output / "sources").mkdir(exist_ok=True)
     for name in ["runtime.jar", "config.json"]:
-        shutil.copy2(fixture / name, OUTPUT / "sources" / name)
-    (OUTPUT / "sources/preview.json").write_text(json.dumps({"label": "独立测试源，仅用于运行时验证"}, ensure_ascii=False))
-    print("Simulator JVM preview ready:", OUTPUT, flush=True)
+        shutil.copy2(fixture / name, output / "sources" / name)
+    (output / "sources/preview.json").write_text(json.dumps({"label": "独立测试源，仅用于运行时验证"}, ensure_ascii=False))
+    print(arguments.platform + " JVM preview ready:", output, flush=True)
 
 
 if __name__ == "__main__":

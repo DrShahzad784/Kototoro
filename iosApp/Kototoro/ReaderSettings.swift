@@ -3,7 +3,7 @@ import Combine
 import SwiftUI
 
 struct ReaderPreferences: Codable, Equatable {
-    var mode = 1
+    var mode = 0
     var fit = 0
     var doublePage = false
     var cover = true
@@ -20,12 +20,14 @@ struct ReaderPreferences: Codable, Equatable {
     var bottomPanels = false
     var autoSpeed = 0.24
     var floatingActions = ["bookmark"]
+    var tapZones = true
+    var reverseTaps = false
 
     init() {}
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        mode = try container.decodeIfPresent(Int.self, forKey: .mode) ?? 1
+        mode = try container.decodeIfPresent(Int.self, forKey: .mode) ?? 0
         fit = try container.decodeIfPresent(Int.self, forKey: .fit) ?? 0
         doublePage = try container.decodeIfPresent(Bool.self, forKey: .doublePage) ?? false
         cover = try container.decodeIfPresent(Bool.self, forKey: .cover) ?? true
@@ -42,6 +44,8 @@ struct ReaderPreferences: Codable, Equatable {
         bottomPanels = try container.decodeIfPresent(Bool.self, forKey: .bottomPanels) ?? false
         autoSpeed = try container.decodeIfPresent(Double.self, forKey: .autoSpeed) ?? 0.24
         floatingActions = try container.decodeIfPresent([String].self, forKey: .floatingActions) ?? ["bookmark"]
+        tapZones = try container.decodeIfPresent(Bool.self, forKey: .tapZones) ?? true
+        reverseTaps = try container.decodeIfPresent(Bool.self, forKey: .reverseTaps) ?? false
     }
 }
 

@@ -1,7 +1,5 @@
 package org.skepsun.kototoro.core.model
 
-import java.util.Locale
-
 val ADULT_TAG_KEYWORDS = setOf(
     "adult",
     "hentai",
@@ -27,11 +25,11 @@ val SAFE_TAG_KEYWORDS = setOf(
 )
 
 fun String.isAdultTagKeyword(): Boolean {
-    return trim().lowercase(Locale.ROOT) in ADULT_TAG_KEYWORDS
+    return trim().lowercase() in ADULT_TAG_KEYWORDS
 }
 
 fun String.containsAdultTagKeyword(): Boolean {
-    val normalized = trim().lowercase(Locale.ROOT)
+    val normalized = trim().lowercase()
     if (normalized.isBlank()) {
         return false
     }
@@ -39,5 +37,5 @@ fun String.containsAdultTagKeyword(): Boolean {
 }
 
 fun String.isExplicitlySafeTagKeyword(): Boolean {
-    return trim().lowercase(Locale.ROOT) in SAFE_TAG_KEYWORDS
+    return trim().lowercase() in SAFE_TAG_KEYWORDS
 }

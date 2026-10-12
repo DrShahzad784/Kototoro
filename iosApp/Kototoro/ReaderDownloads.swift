@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import ImageIO
 import KototoroShared
 import UIKit
 
@@ -21,7 +22,8 @@ enum ReaderDownloads {
     }
     static func isDownloaded(content: IosSourceContent, chapter: IosSourceChapter) -> Bool {
         guard let dir = try? directory(content: content, chapter: chapter) else { return false }
-        return FileManager.default.fileExists(atPath: dir.appendingPathComponent("chapter.json").path)
+        let manifest = content.mediaKind == "NOVEL" ? NovelDownloads.manifestName : "chapter.json"
+        return FileManager.default.fileExists(atPath: dir.appendingPathComponent(manifest).path)
     }
     static func pages(runtime: IosSources, content: IosSourceContent, chapter: IosSourceChapter) async throws -> [IosSourcePage] {
         if let manifest = try manifest(content: content, chapter: chapter) {
@@ -44,25 +46,75 @@ enum ReaderDownloads {
         try await loadedPage(runtime: runtime, content: content, chapter: chapter, page: page,
                              index: index, cropMargins: cropMargins).image
     }
-    static func download(runtime: IosSources, content: IosSourceContent, chapter: IosSourceChapter) async throws {
-        let pages = try await runtime.pages(chapter: chapter)
-        guard !pages.isEmpty else { throw URLError(.zeroByteResource) }
+    @MainActor
+    static func download(runtime: IosSources, content: IosSourceContent, chapter: IosSourceChapter,
+                         progress: ReaderDownloadQueue.Progress = { _, _ in }) async throws {
+        if content.mediaKind == "NOVEL" {
+            try await NovelDownloads.download(runtime: runtime, content: content, chapter: chapter, progress: progress)
+            return
+        }
         let dir = try directory(content: content, chapter: chapter)
+        let partial = dir.appendingPathComponent("partial.json")
+        var saved: Manifest?
+        if let complete = try? manifest(content: content, chapter: chapter) {
+            saved = complete
+        } else if FileManager.default.fileExists(atPath: partial.path) {
+            saved = try? JSONDecoder().decode(Manifest.self, from: Data(contentsOf: partial))
+        } else { saved = nil }
+        let pages: [IosSourcePage]
+        if let checkpoint = saved, let restored = try? IosPageArchive().decode(json: checkpoint.pages),
+           !restored.isEmpty, checkpoint.images.count <= restored.count {
+            pages = restored
+        } else {
+            saved = nil
+            pages = try await runtime.pages(chapter: chapter)
+        }
+        try Task.checkCancellation()
+        guard !pages.isEmpty else { throw URLError(.zeroByteResource) }
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let store = try NativeSourceTransport.dataDirectory.appendingPathComponent("images", isDirectory: true)
-        var records: [ImageRecord] = []
-        // Sequential requests bound decode and extension memory on the interpreter-backed JVM.
-        for page in pages {
-            try Task.checkCancellation()
-            let artifact = try await runtime.image(page: page)
-            _ = try await artifact.decodedImage()
-            let target = dir.appendingPathComponent(artifact.relativePath)
-            if !FileManager.default.fileExists(atPath: target.path) {
-                try FileManager.default.copyItem(at: store.appendingPathComponent(artifact.relativePath), to: target)
-            }
-            records.append(ImageRecord(path: artifact.relativePath, hash: artifact.sha256, bytes: artifact.byteSize))
+        let archive = IosPageArchive().encode(pages: pages)
+        if saved == nil {
+            try JSONEncoder().encode(Manifest(pages: archive, images: [])).write(to: partial, options: .atomic)
         }
-        let value = Manifest(pages: IosPageArchive().encode(pages: pages), images: records)
+        var records: [ImageRecord] = []
+        try progress(0, pages.count)
+        // Sequential requests bound decode and extension memory on the interpreter-backed JVM.
+        for (index, page) in pages.enumerated() {
+            try Task.checkCancellation()
+            var record: ImageRecord?
+            if let saved, saved.images.indices.contains(index) {
+                let existing = saved.images[index]
+                if (try? await ReaderImageArtifact.load(directory: dir, relativePath: existing.path,
+                                                       sha256: existing.hash, byteSize: existing.bytes)) != nil {
+                    record = existing
+                }
+            }
+            try Task.checkCancellation()
+            if record == nil {
+                let artifact = try await runtime.image(page: page)
+                try Task.checkCancellation()
+                _ = try await artifact.decodedImage()
+                try Task.checkCancellation()
+                let target = dir.appendingPathComponent(artifact.relativePath)
+                // Atomic replacement also repairs an equal-length, corrupted previous download.
+                try await Task.detached(priority: .utility) {
+                    try Data(contentsOf: store.appendingPathComponent(artifact.relativePath))
+                        .write(to: target, options: .atomic)
+                }.value
+                record = ImageRecord(path: artifact.relativePath, hash: artifact.sha256, bytes: artifact.byteSize)
+            }
+            guard let record else { throw URLError(.cannotDecodeContentData) }
+            records.append(record)
+            // Keep the saved suffix until it is revalidated, so another interruption does not lose its checkpoint.
+            let checkpointRecords = records + (saved.map { Array($0.images.dropFirst(records.count)) } ?? [])
+            let checkpoint = try JSONEncoder().encode(Manifest(pages: archive, images: checkpointRecords))
+            try await Task.detached(priority: .utility) { try checkpoint.write(to: partial, options: .atomic) }.value
+            try Task.checkCancellation()
+            try progress(records.count, pages.count)
+        }
+        try Task.checkCancellation()
+        let value = Manifest(pages: archive, images: records)
         try JSONEncoder().encode(value).write(to: dir.appendingPathComponent("chapter.json"), options: .atomic)
     }
     static func remove(content: IosSourceContent, chapter: IosSourceChapter) throws {
@@ -75,3 +127,116 @@ enum ReaderDownloads {
         return try JSONDecoder().decode(Manifest.self, from: Data(contentsOf: file))
     }
 }
+
+extension ReaderDownloadQueue {
+    func isFinishing(content: IosSourceContent, chapter: IosSourceChapter) -> Bool {
+        isFinishing(ReaderDownloadRequest(source: content.sourceName, contentID: content.id, chapterID: chapter.id,
+                                         title: "", chapterTitle: "", payload: "").id)
+    }
+
+    func attach(runtime: IosSources) {
+        attach { request, progress in
+            let decoded = try IosDownloadArchive().decode(json: request.payload)
+            guard decoded.content.sourceName == request.source, decoded.content.id == request.contentID,
+                  decoded.chapter.id == request.chapterID else { throw URLError(.cannotParseResponse) }
+            try await ReaderDownloads.download(runtime: runtime, content: decoded.content,
+                                               chapter: decoded.chapter, progress: progress)
+        }
+    }
+
+    func enqueue(content: IosSourceContent, chapters: [IosSourceChapter]) throws {
+        let codec = IosDownloadArchive()
+        try enqueue(chapters.map { chapter in
+            ReaderDownloadRequest(source: content.sourceName, contentID: content.id, chapterID: chapter.id,
+                                  title: content.title, chapterTitle: chapter.title,
+                                  payload: try codec.encode(content: content, chapter: chapter),
+                                  mediaKind: content.mediaKind)
+        })
+    }
+
+    func entry(content: IosSourceContent, chapter: IosSourceChapter) -> ReaderDownloadEntry? {
+        entries.first {
+            $0.request.source == content.sourceName && $0.request.contentID == content.id && $0.request.chapterID == chapter.id
+        }
+    }
+}
+
+/// Novel chapters offline: the shared chapter text (HTML, pictures and their headers) plus each picture as a file.
+/// Text and finished pictures are kept as checkpoints, so pausing or a failed picture resumes where it stopped.
+enum NovelDownloads {
+    static let manifestName = "novel.json"
+    private static let textName = "text.json"
+    private static let maximumImageBytes = 32 * 1024 * 1024
+
+    private struct Manifest: Codable {
+        /// Picture URL → file name in the chapter directory.
+        let images: [String: String]
+    }
+
+    /// The chapter text and its local pictures when downloaded, otherwise nil.
+    static func offline(content: IosSourceContent, chapter: IosSourceChapter) throws -> (IosChapterText, [String: URL])? {
+        let dir = try ReaderDownloads.directory(content: content, chapter: chapter)
+        let manifestFile = dir.appendingPathComponent(manifestName)
+        guard FileManager.default.fileExists(atPath: manifestFile.path) else { return nil }
+        let manifest = try JSONDecoder().decode(Manifest.self, from: Data(contentsOf: manifestFile))
+        let text = try IosChapterTextArchive().decode(json: String(decoding: Data(contentsOf: dir.appendingPathComponent(textName)),
+                                                                   as: UTF8.self))
+        return (text, manifest.images.mapValues { dir.appendingPathComponent($0) })
+    }
+
+    @MainActor
+    static func download(runtime: IosSources, content: IosSourceContent, chapter: IosSourceChapter,
+                         progress: ReaderDownloadQueue.Progress) async throws {
+        let dir = try ReaderDownloads.directory(content: content, chapter: chapter)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let textFile = dir.appendingPathComponent(textName)
+        let archive = IosChapterTextArchive()
+        let text: IosChapterText
+        if let saved = try? Data(contentsOf: textFile),
+           let restored = try? archive.decode(json: String(decoding: saved, as: UTF8.self)) {
+            text = restored
+        } else {
+            guard let fetched = try await runtime.chapterText(chapter: chapter) else { throw URLError(.zeroByteResource) }
+            try Task.checkCancellation()
+            try Data(archive.encode(text: fetched).utf8).write(to: textFile, options: .atomic)
+            text = fetched
+        }
+        // Pictures named in the text as well as those the source lists, each once.
+        var urls: [String] = []
+        for url in text.images + NovelText.blocks(from: text.html).compactMap({ block -> String? in
+            if case .image(let url) = block { return url.absoluteString } else { return nil }
+        }) where !urls.contains(url) { urls.append(url) }
+        let total = urls.count + 1
+        try progress(1, total)
+        var images: [String: String] = [:]
+        for (index, address) in urls.enumerated() {
+            try Task.checkCancellation()
+            let name = "image-" + SHA256.hash(data: Data(address.utf8)).map { String(format: "%02x", $0) }.joined()
+            let target = dir.appendingPathComponent(name)
+            if !isValidImage(target) {
+                guard let url = URL(string: address) else { throw URLError(.badURL) }
+                var request = URLRequest(url: url, timeoutInterval: 60)
+                text.headers(imageUrl: address).forEach { request.setValue($0.value, forHTTPHeaderField: $0.key) }
+                let (data, response) = try await URLSession.shared.data(for: request)
+                try Task.checkCancellation()
+                if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                    throw URLError(.badServerResponse)
+                }
+                guard data.count <= maximumImageBytes,
+                      CGImageSourceCreateWithData(data as CFData, nil).map({ CGImageSourceGetCount($0) > 0 }) == true
+                else { throw URLError(.cannotDecodeContentData) }
+                try await Task.detached(priority: .utility) { try data.write(to: target, options: .atomic) }.value
+            }
+            images[address] = name
+            try progress(index + 2, total)
+        }
+        try Task.checkCancellation()
+        try JSONEncoder().encode(Manifest(images: images)).write(to: dir.appendingPathComponent(manifestName), options: .atomic)
+    }
+
+    private static func isValidImage(_ file: URL) -> Bool {
+        guard let source = CGImageSourceCreateWithURL(file as CFURL, nil) else { return false }
+        return CGImageSourceGetCount(source) > 0
+    }
+}
+

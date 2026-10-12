@@ -69,17 +69,21 @@ class SourceHostSession private constructor(
                     }
                     FileSourcePreferenceStore(configurationDirectory.resolve(it).normalize())
                 }
-                val loader = if (preferences != null) {
-                    (platform as SourceHostPreferencePlatform).initialize(preferences)
-                } else platform.initialize()
+                val loader = timed("platform initialize") {
+                    if (preferences != null) {
+                        (platform as SourceHostPreferencePlatform).initialize(preferences)
+                    } else platform.initialize()
+                }
                 registry = MihonJarRegistry(loader)
                 val installed = SourceHostManagement.readInstalled(configurationDirectory)
                 for (jar in config.jars) {
                     if (installed.jars.any { it.identity.packageName == jar.identity.packageName }) continue
                     registry.load(configurationDirectory.resolve(jar.path).normalize(), jar.identity)
                 }
-                for (jar in installed.jars) {
-                    registry.load(SourceHostManagement.resolveInstalledPath(configurationDirectory, jar.path), jar.identity)
+                timed("extension jars (${installed.jars.size + config.jars.size})") {
+                    for (jar in installed.jars) {
+                        registry.load(SourceHostManagement.resolveInstalledPath(configurationDirectory, jar.path), jar.identity)
+                    }
                 }
                 val images = config.imageDirectory?.let {
                     FileSourceImageStore(configurationDirectory.resolve(it).normalize())
@@ -96,7 +100,9 @@ class SourceHostSession private constructor(
                 if (plugins.isNotEmpty()) {
                     require(platform is SourceHostRuntimePlatform) { "Platform does not support plugin runtimes" }
                 }
-                extra = (platform as? SourceHostRuntimePlatform)?.openRuntimes(plugins, images, preferences)
+                extra = timed("parser plugins (${plugins.size})") {
+                    (platform as? SourceHostRuntimePlatform)?.openRuntimes(plugins, images, preferences)
+                }
                 val primaryRoutes = listOf(
                     RoutedSourceRuntime.Route(mihon::owns, mihon),
                     RoutedSourceRuntime.Route(anime::owns, anime),
@@ -104,17 +110,27 @@ class SourceHostSession private constructor(
                 // Old parser owners live until session close, so requests already using them can finish safely.
                 val retired = mutableListOf<SourceHostRuntimes>()
                 val pluginRoutes = java.util.concurrent.atomic.AtomicReference(extra?.routes.orEmpty())
+                val pluginTitles = java.util.concurrent.atomic.AtomicReference(extra?.titles ?: { emptyMap() })
+                val livePlugins = java.util.concurrent.atomic.AtomicReference(extra)
+                val pluginSources = java.util.concurrent.atomic.AtomicReference(extra?.sources ?: { emptyMap() })
                 val ownedRegistry = registry
                 val ownedPreferences = preferences
-                val manager = SourceHostManagement(configurationDirectory, config.copy(plugins = seedPlugins), registry) { next, publish ->
+                val manager = SourceHostManagement(configurationDirectory, config.copy(plugins = seedPlugins), registry,
+                    { pluginTitles.get()() }, { pluginSources.get()() }) { next, publish ->
                     require(platform is SourceHostRuntimePlatform)
+                    // Prefer changing the live plugin runtimes in place; a full reopen reloads every plugin.
+                    if (livePlugins.get()?.update?.invoke(next, publish) == true) return@SourceHostManagement
                     val replacement = platform.openRuntimes(next, images, ownedPreferences)
                     try { publish() } catch (failure: Throwable) { replacement.close(); throw failure }
                     retired.add(replacement)
+                    livePlugins.set(replacement)
                     pluginRoutes.set(replacement.routes)
+                    pluginTitles.set(replacement.titles)
+                    pluginSources.set(replacement.sources)
                 }
                 return SourceHostSession(
-                    SourceEndpoint(RoutedSourceRuntime { primaryRoutes + pluginRoutes.get() }, ::reportFailure),
+                    SourceEndpoint(RoutedSourceRuntime { primaryRoutes + pluginRoutes.get() }, ::reportFailure,
+                        HostChallenges::of),
                     ownedRegistry, platform, preferences, extra, manager, retired,
                 )
             } catch (failure: Throwable) {
@@ -146,3 +162,14 @@ class SourceHostSession private constructor(
         }
     }
 }
+
+/** Startup phases on stderr (stdout carries the protocol); the embedded interpreter makes these the slow parts. */
+internal inline fun <T> timed(label: String, block: () -> T): T {
+    val start = System.nanoTime()
+    try {
+        return block()
+    } finally {
+        System.err.println("[source-host] $label: ${(System.nanoTime() - start) / 1_000_000} ms")
+    }
+}
+

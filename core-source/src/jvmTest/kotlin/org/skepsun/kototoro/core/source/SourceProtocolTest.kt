@@ -268,6 +268,50 @@ class SourceProtocolTest {
     }
 
     @Test
+    fun `browser challenges cross the wire with the origin only, wherever they sit in the cause chain`() = runTest {
+        val challenged = object : SourceRuntime by runtime {
+            override suspend fun getSources(): List<SourceRef> =
+                throw IllegalStateException("wrapped", SourceChallengeException("https://user:pw@site.test:8443/list?token=secret#x"))
+            override suspend fun describe(sourceName: String): SourceDescriptor =
+                throw java.io.IOException("library challenge")
+        }
+        var reported = false
+        val transport = SourceEndpoint(challenged, { _, _ -> reported = true }) { error ->
+            if (error.message == "library challenge") SourceChallengeException(null) else null
+        }
+        val client = SourceProtocolClient(transport) { "challenge-request" }
+        val first = expectFailure<SourceRemoteException> { client.getSources() }
+        assertEquals(SourceErrorCode.CHALLENGE_REQUIRED, first.error.code)
+        assertEquals("https://site.test:8443", first.error.url)
+        val second = expectFailure<SourceRemoteException> { client.describe(source.name) }
+        assertEquals(SourceErrorCode.CHALLENGE_REQUIRED, second.error.code)
+        assertNull(second.error.url)
+        // Challenges are expected outcomes, not failures to report.
+        assertFalse(reported)
+    }
+
+    @Test
+    fun `browser sessions and cookie imports round-trip and default from the homepage`() = runTest {
+        val imported = mutableListOf<String>()
+        val browser = object : SourceRuntime by runtime {
+            override suspend fun importCookies(sourceName: String, url: String, cookies: List<String>): Int {
+                imported += cookies
+                return cookies.size
+            }
+        }
+        val client = SourceProtocolClient(SourceEndpoint(browser)) { "browser-request" }
+        assertEquals(2, client.importCookies(source.name, "https://fixture.test", listOf("a=1", "b=2")))
+        assertEquals(listOf("a=1", "b=2"), imported)
+        val homepageRuntime = object : SourceRuntime by runtime {
+            override suspend fun describe(sourceName: String) = descriptor.copy(homepage = "https://fixture.test")
+            // Delegation would forward to the delegate's default, which reads the delegate's own descriptor.
+            override suspend fun browserSession(sourceName: String) = super<SourceRuntime>.browserSession(sourceName)
+        }
+        assertEquals(SourceBrowserSession("https://fixture.test"),
+            SourceProtocolClient(SourceEndpoint(homepageRuntime)) { "session" }.browserSession(source.name))
+    }
+
+    @Test
     fun `local failure observer receives the exact request and observer failure never leaks into the wire`() = runTest {
         val original = IllegalStateException("secret-token https://private.test")
         val failing = object : SourceRuntime by runtime {
