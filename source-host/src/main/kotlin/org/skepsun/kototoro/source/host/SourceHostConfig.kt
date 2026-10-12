@@ -12,6 +12,11 @@ data class SourceHostConfig(
     val preferenceDirectory: String? = null,
     /** Non-Tachiyomi plugins (kototoro / kotatsu / UMA parser JARs); served by a [SourceHostRuntimePlatform]. */
     val plugins: List<SourceHostPlugin> = emptyList(),
+    /**
+     * Where verified extensions' source lists are cached by SHA-256. Set, a start-up load registers catalogued
+     * extensions without constructing them; each is constructed when one of its sources is first called.
+     */
+    val catalogDirectory: String? = null,
 )
 
 @Serializable

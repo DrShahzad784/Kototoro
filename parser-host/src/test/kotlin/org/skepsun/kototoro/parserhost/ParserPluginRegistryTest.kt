@@ -14,7 +14,9 @@ import org.junit.jupiter.api.io.TempDir
 import org.skepsun.kototoro.core.source.SourceUnavailableException
 import org.skepsun.kototoro.parsers.model.ContentListFilter
 import org.skepsun.kototoro.parsers.model.SortOrder
+import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 
 class ParserPluginRegistryTest {
     @TempDir lateinit var root: Path
@@ -129,6 +131,51 @@ class ParserPluginRegistryTest {
         assertFalse(registry.owns("FIXTURE_KOTATSU_ONLY"))
         unloaded.complete(Unit)
         assertEquals(2, running.await())
+    }
+
+    @Test
+    fun `a catalogued plugin registers its sources without loading and loads on its first call`() = runBlocking {
+        val catalogs = root.resolve("catalogs")
+        val artifact = Files.copy(Fixtures.kotatsu, root.resolve("plugin.jar"))
+        val hash = ParserPluginInspector().inspect(artifact).sha256
+        ParserPluginRegistry(platform, catalogDirectory = catalogs).use { it.load(artifact, "kotatsu-parsers-redo", hash) }
+        assertTrue(Files.isRegularFile(catalogs.resolve("$hash.catalog")))
+
+        // Unreadable as a jar: only the catalog can describe it, and the first call must notice.
+        Files.copy(Fixtures.png.inputStream(), artifact, StandardCopyOption.REPLACE_EXISTING)
+        ParserPluginRegistry(platform, catalogDirectory = catalogs).use { cached ->
+            val info = cached.load(artifact, "kotatsu-parsers-redo", hash)
+            assertEquals(ParserPluginArchitecture.KOTATSU, info.metadata.architecture)
+            assertEquals(hash, info.metadata.sha256)
+            val listed = cached.sources().single { it.source.name == "FIXTURE_KOTATSU_ONLY" }
+            assertEquals("Fixture Kotatsu", listed.title)
+            assertEquals("kotatsu-parsers-redo", listed.pluginId)
+            assertTrue(cached.owns("FIXTURE_SHARED"))
+            assertThrows<ParserPluginException> { runBlocking { cached.withParser("FIXTURE_KOTATSU_ONLY") {} } }
+        }
+
+        // The original artifact back: the catalogued plugin loads lazily and serves calls.
+        Files.copy(Fixtures.kotatsu, artifact, StandardCopyOption.REPLACE_EXISTING)
+        ParserPluginRegistry(platform, catalogDirectory = catalogs).use { cached ->
+            cached.load(artifact, "kotatsu-parsers-redo", hash)
+            val size = cached.withParser("FIXTURE_KOTATSU_ONLY") { handle ->
+                handle.parser.getList(0, SortOrder.POPULARITY, ContentListFilter.EMPTY).size
+            }
+            assertEquals(2, size)
+        }
+    }
+
+    @Test
+    fun `a damaged catalog falls back to a full load and is rewritten`() {
+        val catalogs = Files.createDirectories(root.resolve("catalogs"))
+        val hash = ParserPluginInspector().inspect(Fixtures.tsuki).sha256
+        Files.writeString(catalogs.resolve("$hash.catalog"), "not a catalog")
+        ParserPluginRegistry(platform, catalogDirectory = catalogs).use { it.load(Fixtures.tsuki, "uma", hash) }
+        assertTrue(Files.readAllLines(catalogs.resolve("$hash.catalog")).first().startsWith("kototoro-parser-catalog\t"))
+        ParserPluginRegistry(platform, catalogDirectory = catalogs).use { cached ->
+            cached.load(Fixtures.tsuki, "uma", hash)
+            assertEquals(2, cached.sources().size)
+        }
     }
 
     @Test

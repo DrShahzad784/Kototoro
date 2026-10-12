@@ -64,6 +64,56 @@ class MihonJarRegistryTest {
     }
 
     @Test
+    fun `a catalogued extension registers without construction and is constructed on its first call`() {
+        val fixtures = JarFixture(directory)
+        val counter = "fixture.constructed." + System.nanoTime()
+        val path = fixtures.sourceJar(body = "public Single() { System.setProperty(\"$counter\", " +
+            "String.valueOf(Integer.getInteger(\"$counter\", 0) + 1)); }")
+        val identity = fixtures.identity(path)
+        val catalogs = directory.resolve("catalogs")
+        fun constructions() = Integer.getInteger(counter, 0)
+        fixtures.compatibilityLoader().use { compatibility ->
+            val full = MihonJarRegistry(compatibility, catalogDirectory = catalogs).use { it.load(path, identity) }
+            assertEquals(1, constructions())
+            assertTrue(java.nio.file.Files.isRegularFile(catalogs.resolve("${identity.sha256}.json")))
+            MihonJarRegistry(compatibility, catalogDirectory = catalogs).use { registry ->
+                assertEquals(full, registry.load(path, identity))
+                assertEquals(full, registry.installed().single())
+                assertEquals(1, constructions(), "A catalogued load must not run the extension")
+                registry.withSource(full.sources.single().source.name) { assertEquals("fixture.extension.Single", it.javaClass.name) }
+                registry.withSource(full.sources.single().source.name) {}
+                assertEquals(2, constructions(), "Constructed once, on the first call")
+            }
+            // A changed artifact behind a catalog is refused on its first call, not served.
+            java.nio.file.Files.copy(fixtures.sourceJar("Other"), path, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            MihonJarRegistry(compatibility, catalogDirectory = catalogs).use { registry ->
+                registry.load(path, identity)
+                assertThrows(SourceJarException::class.java) { registry.withSource(full.sources.single().source.name) {} }
+            }
+        }
+    }
+
+    @Test
+    fun `a catalogue entry for another identity or a damaged one is ignored`() {
+        val fixtures = JarFixture(directory)
+        val path = fixtures.sourceJar()
+        val identity = fixtures.identity(path)
+        val catalogs = java.nio.file.Files.createDirectories(directory.resolve("catalogs"))
+        java.nio.file.Files.writeString(catalogs.resolve("${identity.sha256}.json"), "{broken")
+        fixtures.compatibilityLoader().use { compatibility ->
+            MihonJarRegistry(compatibility, catalogDirectory = catalogs).use { registry ->
+                assertEquals("MIHON_9007199254740993", registry.load(path, identity).sources.single().source.name)
+            }
+            assertTrue(java.nio.file.Files.readString(catalogs.resolve("${identity.sha256}.json")).contains("MIHON_9007199254740993"))
+            assertThrows(SourceJarException::class.java) {
+                MihonJarRegistry(compatibility, catalogDirectory = catalogs).use {
+                    it.load(path, identity.copy(versionCode = identity.versionCode + 1))
+                }
+            }
+        }
+    }
+
+    @Test
     fun `isolated JAR entry loads and exposes exact Android source key`() {
         val fixtures = JarFixture(directory)
         val path = fixtures.sourceJar()

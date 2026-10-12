@@ -2,33 +2,49 @@ package org.skepsun.kototoro.source.host
 
 import kotlinx.coroutines.ThreadContextElement
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
 import org.skepsun.kototoro.core.source.LoadedMihonExtension
 import org.skepsun.kototoro.core.source.MihonJarIdentity
+import org.skepsun.kototoro.core.source.MihonJarMetadata
 import org.skepsun.kototoro.core.source.MihonSourceDescriptor
 import org.skepsun.kototoro.core.source.SourceEcosystem
 import org.skepsun.kototoro.core.source.SourceRef
 import java.io.Closeable
 import java.lang.reflect.InvocationTargetException
 import java.net.URLClassLoader
+import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.WeakHashMap
 import kotlin.coroutines.AbstractCoroutineContextElement
 import kotlin.coroutines.CoroutineContext
 
-/** The embedding platform initializes the pinned compatibility runtime before constructing this registry. */
+/**
+ * The embedding platform initializes the pinned compatibility runtime before constructing this registry.
+ *
+ * With a [catalogDirectory], each verified extension's source list is cached under its SHA-256. A later [load] of the
+ * same artifact registers the sources from that catalog; the JAR is hashed and the extension constructed when one of
+ * its sources is first called, so extensions whose sources go unused (switched off) never run at start-up.
+ */
 class MihonJarRegistry(
     private val compatibilityLoader: ClassLoader,
     private val inspector: MihonJarInspector = MihonJarInspector(),
+    private val catalogDirectory: Path? = null,
 ) : Closeable {
-    private data class Extension(
-        val info: LoadedMihonExtension,
-        val loader: URLClassLoader,
-        val sources: Map<String, Any>,
-        var activeCalls: Int = 0,
-        var retired: Boolean = false,
-        val states: MutableMap<String, WeakHashMap<Any, Any>> = mutableMapOf(),
-    )
+    private class Constructed(val loader: URLClassLoader, val sources: Map<String, Any>)
+
+    /** [constructed] is null until the first call when the sources came from a catalog. */
+    private class Extension(val info: LoadedMihonExtension, val path: Path, @Volatile var constructed: Constructed?) {
+        val keys: Set<String> = info.sources.mapTo(LinkedHashSet()) { it.source.name }
+        var activeCalls: Int = 0
+        var retired: Boolean = false
+        val states: MutableMap<String, WeakHashMap<Any, Any>> = mutableMapOf()
+
+        fun closeIfIdle() {
+            if (retired && activeCalls == 0) synchronized(this) { constructed?.loader?.close() }
+        }
+    }
 
     private val extensions = linkedMapOf<String, Extension>()
     private val retirementFailures = mutableListOf<Exception>()
@@ -48,10 +64,40 @@ class MihonJarRegistry(
     private fun install(path: Path, expected: MihonJarIdentity, replace: Boolean,
         beforePublish: (LoadedMihonExtension) -> Unit): LoadedMihonExtension {
         requireOpen()
-        val metadata = inspector.inspect(path)
-        inspector.verify(metadata, expected)
-        val previous = extensions[metadata.packageName]
+        // An install or update always constructs the extension; a start-up load may use the catalog.
+        val cached = if (replace) null else readCatalog(expected)
+        val metadata = if (cached != null) null else inspector.inspect(path).also { inspector.verify(it, expected) }
+        val previous = extensions[expected.packageName]
         if (previous != null && !replace) throw SourceJarException(SourceJarFailure.ALREADY_LOADED)
+        val extension = cached?.let { Extension(it, path, null) } ?: run {
+            val (constructed, descriptors) = construct(path, requireNotNull(metadata))
+            Extension(LoadedMihonExtension(metadata, descriptors), path, constructed)
+        }
+        try {
+            val registeredKeys = extensions.values.filter { it !== previous }.flatMap { it.keys }.toSet()
+            if (extension.keys.size != extension.info.sources.size || extension.keys.any { it in registeredKeys }) {
+                throw SourceJarException(SourceJarFailure.DUPLICATE_SOURCE)
+            }
+            beforePublish(extension.info)
+        } catch (error: Throwable) {
+            try { extension.constructed?.loader?.close() } catch (closeError: Exception) { error.addSuppressed(closeError) }
+            // As before: a failed publication (e.g. persisting the record) surfaces as an installation failure.
+            when (error) {
+                is SourceJarException -> throw error
+                is Exception, is LinkageError -> throw SourceJarException(SourceJarFailure.CONSTRUCTION_FAILED, error)
+                else -> throw error
+            }
+        }
+        if (cached == null) writeCatalog(extension.info)
+        extensions[extension.info.metadata.packageName] = extension
+        if (previous != null) {
+            try { retire(previous) } catch (error: Exception) { retirementFailures += error }
+        }
+        return extension.info
+    }
+
+    /** Runs the extension's entry points and describes their sources; any failure closes the class loader. */
+    private fun construct(path: Path, metadata: MihonJarMetadata): Pair<Constructed, List<MihonSourceDescriptor>> {
         val anime = metadata.ecosystem == SourceEcosystem.ANIYOMI
         val catalogueType = compatibilityType(
             if (anime) "eu.kanade.tachiyomi.animesource.AnimeCatalogueSource" else "eu.kanade.tachiyomi.source.CatalogueSource")
@@ -95,17 +141,8 @@ class MihonJarRegistry(
                     )
                 }
                 val keys = descriptors.map { it.source.name }
-                val registeredKeys = extensions.values.filter { it !== previous }.flatMap { it.sources.keys }.toSet()
-                if (keys.distinct().size != keys.size || keys.any { it in registeredKeys }) {
-                    throw SourceJarException(SourceJarFailure.DUPLICATE_SOURCE)
-                }
-                val info = LoadedMihonExtension(metadata, descriptors)
-                beforePublish(info)
-                extensions[metadata.packageName] = Extension(info, loader, keys.zip(instances).toMap())
-                if (previous != null) {
-                    try { retire(previous) } catch (error: Exception) { retirementFailures += error }
-                }
-                return info
+                if (keys.distinct().size != keys.size) throw SourceJarException(SourceJarFailure.DUPLICATE_SOURCE)
+                return Constructed(loader, keys.zip(instances).toMap()) to descriptors
             }
         } catch (error: Throwable) {
             try { loader.close() } catch (closeError: Exception) { error.addSuppressed(closeError) }
@@ -115,6 +152,59 @@ class MihonJarRegistry(
                 is Exception, is LinkageError -> throw SourceJarException(SourceJarFailure.CONSTRUCTION_FAILED, cause)
                 else -> throw cause
             }
+        }
+    }
+
+    /**
+     * The extension behind a catalogued entry, constructed on its first call. The artifact must still match the
+     * catalogued identity and produce the same sources; a failure is reported to that call and the next one retries.
+     */
+    private fun constructedOf(extension: Extension): Constructed = extension.constructed ?: synchronized(extension) {
+        extension.constructed ?: run {
+            val start = System.nanoTime()
+            val expected = extension.info.metadata
+            val metadata = inspector.inspect(extension.path)
+            inspector.verify(metadata, MihonJarIdentity(expected.packageName, expected.versionCode, expected.sha256))
+            val (constructed, descriptors) = construct(extension.path, metadata)
+            if (descriptors != extension.info.sources) {
+                constructed.loader.close()
+                throw SourceJarException(SourceJarFailure.CONSTRUCTION_FAILED)
+            }
+            extension.constructed = constructed
+            System.err.println("[source-host] extension ${expected.packageName} (on first use): " +
+                "${(System.nanoTime() - start) / 1_000_000} ms")
+            constructed
+        }
+    }
+
+    private fun catalogFile(sha256: String): Path? = catalogDirectory?.resolve("${sha256.lowercase()}.json")
+
+    private fun readCatalog(expected: MihonJarIdentity): LoadedMihonExtension? {
+        val file = catalogFile(expected.sha256)?.takeIf { Files.isRegularFile(it) } ?: return null
+        return try {
+            val info = catalogJson.decodeFromString(LoadedMihonExtension.serializer(), Files.readString(file))
+            info.takeIf {
+                it.metadata.packageName == expected.packageName && it.metadata.versionCode == expected.versionCode &&
+                    it.metadata.sha256.equals(expected.sha256, ignoreCase = true) && it.sources.isNotEmpty()
+            }
+        } catch (_: Exception) {
+            null // A damaged catalog only costs a full load, which rewrites it.
+        }
+    }
+
+    private fun writeCatalog(info: LoadedMihonExtension) {
+        val file = catalogFile(info.metadata.sha256) ?: return
+        try {
+            Files.createDirectories(file.parent)
+            val temporary = Files.createTempFile(file.parent, "catalog-", ".tmp")
+            try {
+                Files.writeString(temporary, catalogJson.encodeToString(LoadedMihonExtension.serializer(), info))
+                Files.move(temporary, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+            } finally {
+                Files.deleteIfExists(temporary)
+            }
+        } catch (_: Exception) {
+            // Best effort: without a catalog the next start constructs the extension, as before.
         }
     }
 
@@ -163,15 +253,21 @@ class MihonJarRegistry(
         override fun close() { if (released.compareAndSet(false, true)) releaseCall() }
     }
 
-    @Synchronized
+    /** Leases the extension under the registry lock, then constructs it (if catalogued) outside that lock. */
     private fun acquire(sourceName: String): SourceLease {
-        requireOpen()
-        val extension = extensions.values.firstOrNull { sourceName in it.sources }
-            ?: throw org.skepsun.kototoro.core.source.SourceUnavailableException(sourceName)
-        extension.activeCalls++
+        val extension = synchronized(this) {
+            requireOpen()
+            extensions.values.firstOrNull { sourceName in it.keys }
+                ?.also { it.activeCalls++ }
+                ?: throw org.skepsun.kototoro.core.source.SourceUnavailableException(sourceName)
+        }
+        val constructed = try { constructedOf(extension) } catch (error: Throwable) {
+            release(extension)
+            throw error
+        }
         return SourceLease(
-            extension.sources.getValue(sourceName), extension.info.sources.first { it.source.name == sourceName },
-            extension.loader, { retain(extension) }, { release(extension) },
+            constructed.sources.getValue(sourceName), extension.info.sources.first { it.source.name == sourceName },
+            constructed.loader, { retain(extension) }, { release(extension) },
             { owner, create -> sourceState(extension, sourceName, owner, create) },
         )
     }
@@ -191,12 +287,12 @@ class MihonJarRegistry(
     @Synchronized
     private fun release(extension: Extension) {
         extension.activeCalls--
-        if (extension.retired && extension.activeCalls == 0) extension.loader.close()
+        extension.closeIfIdle()
     }
 
     private fun retire(extension: Extension) {
         extension.retired = true
-        if (extension.activeCalls == 0) extension.loader.close()
+        extension.closeIfIdle()
     }
 
     @Synchronized
@@ -246,3 +342,5 @@ class MihonJarRegistry(
         }
     }
 }
+
+private val catalogJson = Json { ignoreUnknownKeys = true }
