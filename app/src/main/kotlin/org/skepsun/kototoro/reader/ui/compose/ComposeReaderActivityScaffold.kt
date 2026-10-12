@@ -97,6 +97,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.layout.MeasurePolicy
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.Constraints
@@ -1097,95 +1098,114 @@ private fun ReaderCutoutAwareInfoBarLayout(
                 )
                 if (boundsInWindow != updatedBounds) boundsInWindow = updatedBounds
             },
-    ) { measurables, constraints ->
-        val width = constraints.maxWidth
-        val contentHeightLimit = (constraints.maxHeight - verticalPadding * 2).coerceAtLeast(0)
-        val childConstraints = Constraints(
-            minWidth = 0,
-            maxWidth = (width - leftPadding - rightPadding).coerceAtLeast(0),
-            minHeight = 0,
-            maxHeight = contentHeightLimit,
-        )
-        var measurableIndex = 1
-        val progressMeasurable = if (progressStatus != null) measurables.getOrNull(measurableIndex++) else null
-        val systemPlaceable = if (systemStatus != null) {
-            measurables.getOrNull(measurableIndex)?.measure(childConstraints)
-        } else {
-            null
-        }
-        val systemWidth = systemPlaceable?.width ?: 0
-        val naturalProgressPlaceable = progressMeasurable?.measure(childConstraints)
-        val progressWidth = naturalProgressPlaceable?.width ?: 0
-        val trailingWidth = if (layout == ReaderInfoBarLayout.CENTERED && progressWidth > 0) {
-            itemSpacing + progressWidth + systemWidth
-        } else {
-            systemWidth
-        }
-        val readingMeasurable = measurables.first()
-        val desiredReadingWidth = readingMeasurable
-            .maxIntrinsicWidth(contentHeightLimit)
-            .coerceAtMost((childConstraints.maxWidth - trailingWidth).coerceAtLeast(0))
-        val placement = resolveReaderInfoBarPlacement(
-            width = width,
-            desiredReadingWidth = desiredReadingWidth,
-            systemStatusWidth = trailingWidth,
+        measurePolicy = readerInfoBarMeasurePolicy(
             layout = layout,
             leftPadding = leftPadding,
             rightPadding = rightPadding,
-            cutout = localCutout,
-            cutoutSpacing = obstructionSpacing,
-        )
-        val readingPlaceable = readingMeasurable.measure(
-            childConstraints.copy(maxWidth = placement.readingWidth),
-        )
-        val progressPlacement = naturalProgressPlaceable?.let { progress ->
-            if (layout == ReaderInfoBarLayout.CENTERED) {
-                ReaderInfoBarItemPlacement(
-                    x = placement.systemStatusX + itemSpacing,
-                    width = progress.width,
-                )
-            } else {
-                resolveReaderInfoBarProgressPlacement(
-                    readingEnd = placement.readingX + readingPlaceable.width,
-                    systemStatusX = placement.systemStatusX,
-                    desiredProgressWidth = progress.width,
-                    cutout = localCutout,
-                    cutoutSpacing = obstructionSpacing,
-                )
-            }
-        }
-        val progressPlaceable = progressPlacement?.let { progress ->
-            if (progress.width == naturalProgressPlaceable.width) {
-                naturalProgressPlaceable
-            } else {
-                progressMeasurable.measure(childConstraints.copy(maxWidth = progress.width))
-            }
-        }
-        val resolvedSystemStatusX = if (layout == ReaderInfoBarLayout.CENTERED && progressPlaceable != null) {
-            progressPlacement.x + progressPlaceable.width
+            verticalPadding = verticalPadding,
+            obstructionSpacing = obstructionSpacing,
+            itemSpacing = itemSpacing,
+            localCutout = localCutout,
+            hasProgressStatus = progressStatus != null,
+            hasSystemStatus = systemStatus != null,
+        ),
+    )
+}
+
+internal fun readerInfoBarMeasurePolicy(
+    layout: ReaderInfoBarLayout,
+    leftPadding: Int,
+    rightPadding: Int,
+    verticalPadding: Int,
+    obstructionSpacing: Int,
+    itemSpacing: Int,
+    localCutout: ReaderInfoBarCutout?,
+    hasProgressStatus: Boolean,
+    hasSystemStatus: Boolean,
+): MeasurePolicy = MeasurePolicy { measurables, constraints ->
+    val width = constraints.maxWidth
+    val contentHeightLimit = (constraints.maxHeight - verticalPadding * 2).coerceAtLeast(0)
+    val childConstraints = Constraints(
+        minWidth = 0,
+        maxWidth = (width - leftPadding - rightPadding).coerceAtLeast(0),
+        minHeight = 0,
+        maxHeight = contentHeightLimit,
+    )
+    var measurableIndex = 1
+    val progressMeasurable = if (hasProgressStatus) measurables.getOrNull(measurableIndex++) else null
+    val systemPlaceable = if (hasSystemStatus) {
+        measurables.getOrNull(measurableIndex)?.measure(childConstraints)
+    } else {
+        null
+    }
+    val systemWidth = systemPlaceable?.width ?: 0
+    val progressWidth = progressMeasurable?.maxIntrinsicWidth(contentHeightLimit)
+        ?.coerceIn(0, childConstraints.maxWidth) ?: 0
+    val trailingWidth = if (layout == ReaderInfoBarLayout.CENTERED && progressWidth > 0) {
+        itemSpacing + progressWidth + systemWidth
+    } else {
+        systemWidth
+    }
+    val readingMeasurable = measurables.first()
+    val desiredReadingWidth = readingMeasurable
+        .maxIntrinsicWidth(contentHeightLimit)
+        .coerceAtMost((childConstraints.maxWidth - trailingWidth).coerceAtLeast(0))
+    val placement = resolveReaderInfoBarPlacement(
+        width = width,
+        desiredReadingWidth = desiredReadingWidth,
+        systemStatusWidth = trailingWidth,
+        layout = layout,
+        leftPadding = leftPadding,
+        rightPadding = rightPadding,
+        cutout = localCutout,
+        cutoutSpacing = obstructionSpacing,
+    )
+    val readingPlaceable = readingMeasurable.measure(
+        childConstraints.copy(maxWidth = placement.readingWidth),
+    )
+    val progressPlacement = progressMeasurable?.let {
+        if (layout == ReaderInfoBarLayout.CENTERED) {
+            ReaderInfoBarItemPlacement(
+                x = placement.systemStatusX + itemSpacing,
+                width = progressWidth,
+            )
         } else {
-            placement.systemStatusX
+            resolveReaderInfoBarProgressPlacement(
+                readingEnd = placement.readingX + readingPlaceable.width,
+                systemStatusX = placement.systemStatusX,
+                desiredProgressWidth = progressWidth,
+                cutout = localCutout,
+                cutoutSpacing = obstructionSpacing,
+            )
         }
-        val contentHeight = maxOf(
-            readingPlaceable.height,
-            progressPlaceable?.height ?: 0,
-            systemPlaceable?.height ?: 0,
+    }
+    val progressPlaceable = progressPlacement?.let { progress ->
+        progressMeasurable.measure(childConstraints.copy(maxWidth = progress.width))
+    }
+    val resolvedSystemStatusX = if (layout == ReaderInfoBarLayout.CENTERED && progressPlaceable != null) {
+        progressPlacement.x + progressPlaceable.width
+    } else {
+        placement.systemStatusX
+    }
+    val contentHeight = maxOf(
+        readingPlaceable.height,
+        progressPlaceable?.height ?: 0,
+        systemPlaceable?.height ?: 0,
+    )
+    val height = (contentHeight + verticalPadding * 2).coerceIn(constraints.minHeight, constraints.maxHeight)
+    layout(width, height) {
+        readingPlaceable.place(
+            x = placement.readingX,
+            y = (height - readingPlaceable.height) / 2,
         )
-        val height = (contentHeight + verticalPadding * 2).coerceIn(constraints.minHeight, constraints.maxHeight)
-        layout(width, height) {
-            readingPlaceable.place(
-                x = placement.readingX,
-                y = (height - readingPlaceable.height) / 2,
-            )
-            systemPlaceable?.place(
-                x = resolvedSystemStatusX,
-                y = (height - systemPlaceable.height) / 2,
-            )
-            progressPlaceable?.place(
-                x = progressPlacement.x,
-                y = (height - progressPlaceable.height) / 2,
-            )
-        }
+        systemPlaceable?.place(
+            x = resolvedSystemStatusX,
+            y = (height - systemPlaceable.height) / 2,
+        )
+        progressPlaceable?.place(
+            x = progressPlacement.x,
+            y = (height - progressPlaceable.height) / 2,
+        )
     }
 }
 
