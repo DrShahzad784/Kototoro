@@ -229,6 +229,11 @@ class IosLibrary {
         records.setCategories(content.value, categoryIds.map(Int::toLong).toSet())
 
     @Throws(Exception::class)
+    suspend fun updateCategories(contents: List<IosSourceContent>, included: List<Int>, excluded: List<Int>) =
+        records.updateCategories(contents.map { it.value }, included.map(Int::toLong).toSet(),
+            excluded.map(Int::toLong).toSet())
+
+    @Throws(Exception::class)
     suspend fun favouriteCategories(content: IosSourceContent): List<Int> =
         database.getFavouritesDao().findCategories(content.value.id).map(Long::toInt)
 

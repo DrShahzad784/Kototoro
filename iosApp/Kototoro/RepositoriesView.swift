@@ -95,6 +95,16 @@ struct RepositoriesView: View {
                             Button("重置") { setLanguages([]) }
                                 .font(.subheadline).accessibilityIdentifier("extension.language.reset")
                         }
+                        // The ecosystem choice lives in the toolbar menu and persists; show it here so a list
+                        // narrowed to one ecosystem never looks like missing extensions.
+                        if let selected = ExtensionEcosystem(rawValue: ecosystem) {
+                            Button { ecosystem = "" } label: {
+                                Label(selected.title, systemImage: "xmark.circle.fill")
+                            }
+                            .buttonStyle(.glass).controlSize(.small)
+                            .accessibilityLabel("仅显示\(selected.title)，点按清除")
+                            .accessibilityIdentifier("extension.ecosystem.clear")
+                        }
                         Spacer()
                     }
                 }

@@ -139,12 +139,42 @@ class SourceLibrary(
             }
             val now = kotlin.time.Clock.System.now().toEpochMilliseconds()
             for (categoryId in categoryIds) {
-                val previous = dao.find(content.id, categoryId)
-                dao.upsert(FavouriteEntity(mangaId = content.id, categoryId = categoryId,
-                    sortKey = previous?.sortKey ?: 0, isPinned = previous?.isPinned ?: false,
-                    createdAt = previous?.createdAt ?: now, updatedAt = now, deletedAt = 0))
+                addMembership(content.id, categoryId, now)
             }
         }
+    }
+
+    /** Android's bulk category toggle: untouched memberships and richer stored details remain intact. */
+    suspend fun updateCategories(contents: List<SourceContent>, included: Set<Long>, excluded: Set<Long>) {
+        require(contents.isNotEmpty() && contents.map { it.id }.distinct().size == contents.size)
+        require(included.intersect(excluded).isEmpty())
+        if (included.isEmpty() && excluded.isEmpty()) return
+        database.useWriterConnection { connection ->
+            connection.immediateTransaction {
+                val valid = database.getFavouriteCategoriesDao().findAll().map { it.categoryId.toLong() }.toSet()
+                require((included + excluded).all { it in valid }) { "Category no longer exists" }
+                val now = kotlin.time.Clock.System.now().toEpochMilliseconds()
+                for (content in contents) {
+                    val existing = database.getMangaDao().find(content.id)?.manga
+                    if (existing == null) {
+                        if (included.isEmpty()) continue
+                        saveInTransaction(content)
+                    } else {
+                        requireSameIdentity(existing, content)
+                    }
+                    for (categoryId in excluded) database.getFavouritesDao().delete(content.id, categoryId)
+                    for (categoryId in included) addMembership(content.id, categoryId, now)
+                }
+            }
+        }
+    }
+
+    private suspend fun addMembership(contentId: Long, categoryId: Long, now: Long) {
+        val dao = database.getFavouritesDao()
+        val previous = dao.find(contentId, categoryId)
+        dao.upsert(FavouriteEntity(mangaId = contentId, categoryId = categoryId,
+            sortKey = previous?.sortKey ?: 0, isPinned = previous?.isPinned ?: false,
+            createdAt = previous?.createdAt ?: now, updatedAt = now, deletedAt = 0))
     }
 
     suspend fun save(content: SourceContent) = database.useWriterConnection { connection ->
@@ -188,12 +218,7 @@ class SourceLibrary(
                 // Android creates categories with update tracking on; the subscriptions page relies on it.
                 title = "收藏", order = "NEWEST", track = true, isVisibleInLibrary = true, deletedAt = 0,
             ))
-            val existing = database.getFavouritesDao().find(content.id, categoryId)
-            database.getFavouritesDao().upsert(FavouriteEntity(
-                mangaId = content.id, categoryId = categoryId, sortKey = existing?.sortKey ?: 0,
-                isPinned = existing?.isPinned ?: false, createdAt = existing?.createdAt ?: now,
-                updatedAt = now, deletedAt = 0,
-            ))
+            addMembership(content.id, categoryId, now)
         }
     }
 

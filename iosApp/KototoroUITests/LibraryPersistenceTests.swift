@@ -77,6 +77,46 @@ final class LibraryPersistenceTests: XCTestCase {
         XCTAssertTrue(chip(first, in: app).exists)
     }
 
+    /// The library has only its own search (no inherited global field under the title), the categories stay pinned
+    /// while the works scroll, and swiping sideways over the works moves between categories.
+    @MainActor
+    func testCategoriesStayPinnedAndSwipeBetweenCategories() {
+        continueAfterFailure = false
+        let app = XCUIApplication(); app.launch()
+        let addButton = app.buttons["category.add"]
+        XCTAssertTrue(addButton.waitForExistence(timeout: 30))
+        expectation(for: NSPredicate(format: "enabled == true"), evaluatedWith: addButton)
+        waitForExpectations(timeout: 30)
+        XCTAssertFalse(app.searchFields["搜索全部来源中的作品"].exists, "Global search leaked into the library")
+        let title = "滑动 \(UUID().uuidString.prefix(6))"
+        addButton.tap()
+        let field = app.textFields["category.title"]
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        field.tap(); field.typeText(title)
+        app.buttons["category.save"].tap()
+        XCTAssertTrue(field.waitForNonExistence(timeout: 10))
+
+        let all = app.buttons["category.all"]
+        XCTAssertTrue(all.waitForExistence(timeout: 10))
+        if !all.isSelected { all.tap() }
+        XCTAssertTrue(all.isSelected)
+        let area = app.scrollViews.firstMatch
+        area.swipeUp()
+        XCTAssertTrue(all.isHittable, "Categories should stay pinned while the works scroll: \(app.debugDescription)")
+        area.swipeDown()
+        // From 全部 a left swipe selects the first category, a right swipe returns.
+        area.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.6))
+            .press(forDuration: 0.05, thenDragTo: area.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.6)))
+        expectation(for: NSPredicate(format: "selected == false"), evaluatedWith: all)
+        waitForExpectations(timeout: 5)
+        let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "Swiped to the next category"
+        shot.lifetime = .keepAlways; add(shot)
+        area.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.6))
+            .press(forDuration: 0.05, thenDragTo: area.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.6)))
+        expectation(for: NSPredicate(format: "selected == true"), evaluatedWith: all)
+        waitForExpectations(timeout: 5)
+    }
+
     @MainActor
     func testCategorySurvivesAppRestart() {
         let app = XCUIApplication()

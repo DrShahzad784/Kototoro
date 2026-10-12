@@ -34,6 +34,9 @@ xcodebuild -project "iosApp/Kototoro.xcodeproj" -scheme "Kototoro" \
 ```
 
 默认应用支持 CMS 浏览／详情／播放、收藏分类、历史、播放进度恢复与手动更新检测。
+来源列表长按作品可收藏或进入多选（顶栏换为全选／收藏操作栏）；列表与详情页的收藏都弹出可多选的分类框，
+批量时显示部分选中，只写入改动的分类，取消不写入。作品库在作品区左右滑动切换分组，横滑不会打开作品。
+回归：`-only-testing:KototoroUITests/ProductFlowTests/testBrowseAndDetailsShareMultiCategoryFavouritesAndBulkSelection`（需 CMS fixture）。
 默认构建不包含第三方 JVM/兼容 JAR；下面的开发预览支持扩展仓库、安装、搜索与分页、漫画／小说阅读。
 数据库位于应用沙盒 `Library/Application Support/Kototoro/library.db`，不在缓存或临时目录。
 不使用破坏性 schema 回退；导入旧版本 SQLite 文件的迁移不属于当前切片。
@@ -118,7 +121,7 @@ xcodebuild -project "iosApp/Kototoro.xcodeproj" -scheme Kototoro \
 
 额外需要 JDK 24。所有下载/源码/构建工具/原生库/兼容 JAR 均在 ignored `iosApp/build` 中；
 脚本不创建 Git 分支、不提交、不执行全局安装或清理用户数据。GNU m4/autoconf 安装到本地 build/tools。
-固定版本和 SHA-256 见 `Scripts/jvm-preview-pins.json`，上游补丁和原始许可证保存在下载的源码树中。
+固定版本和 SHA-256 见 `Scripts/jvm-preview-pins.json`，OpenJDK 原始许可证保存在本地源码树中。
 
 仓库根目录执行：
 
@@ -127,8 +130,11 @@ python3 "iosApp/Scripts/build-jvm-preview.py"
 python3 "iosApp/Scripts/test-jvm-bridge.py"
 ```
 
-第一条从固定 OpenJDK 源码构建 **arm64 模拟器 Zero**，应用 iOS 路径/静态符号补丁及模拟器 MAP_JIT / W^X
-补丁。Java 26 模块数据和 legal 目录取自已校验的 TachiyomiAzIOS v8.9.1，避免与移动 VM 混用新版 snapshot。
+第一条从固定 OpenJDK 源码构建 **arm64 模拟器 Zero**，使用本项目 `Scripts/openjdk-ios.py` 的 iOS 路径、
+Darwin 信号上下文、静态符号和模拟器 MAP_JIT / W^X 适配。符号表从本次构建的静态库生成。
+Java 26 模块、时区和证书数据来自同一份本地 OpenJDK 构建，保留其 legal 目录；不从 IPA 提取运行时镜像。
+固定的 JDK 26 仅作构建工具，使用 Mobile 修订的 JlinkTask，禁用 JLI 预生成。详见
+[`mihon-ios-shims`](../mihon-ios-shims/README.md)。
 默认预览只放入自有测试 ABI/扩展；不使用第三方兼容 JAR 或上游 ExtensionHost。
 第二条验证同一个 C/JNI 桥的 Unicode、64 位 ID、多线程交换、Java 异常恢复和关闭。
 
@@ -149,7 +155,7 @@ fixture 预览只包含自有测试 ABI，扩展管理会禁用真实扩展安�
 
 ## 真实扩展预览（Mihon / Tsundoku / Aniyomi / JAR）
 
-`stage-mihon-preview.py` 现在固定 5 个样本（见脚本顶部 `ARTIFACTS`）：再漫画、AllNovelFull、AnimeGG、Anime1.me 与
+`stage-mihon-preview.py` 现在固定 6 个样本（见脚本顶部 `ARTIFACTS`）：再漫画、Comix、AllNovelFull、AnimeGG、Anime1.me 与
 kototoro-parsers 插件 137，在 Mac 上转换后与 parser-host 一起装入 `iosApp/build/jvm-real-api`。上模拟器前可先在 Mac JVM 探测：
 
 ```bash
@@ -165,11 +171,14 @@ python3 "iosApp/Scripts/probe-jvm-preview.py" MANGADEX BILINOVEL FANTUAN
 python3 "iosApp/Scripts/stage-mihon-preview.py"
 ```
 
-该脚本从同一已校验 IPA 提取 Mobile API/boot shims，启用独立 `:mihon-ios-compat`，
+该脚本从已校验发行容器提取 AndroidCompat/Suwayomi API 和基础依赖，排除所有 `000-*` shim，启用独立
+`:mihon-ios-compat` 和项目自写的 `:mihon-ios-shims`，不提取或加载 boot shims；
 下载 SHA-256 固定的再漫画 1.6.0 APK，并调用共享 `:dex-convert:convertApk` 生成 JAR。
 没有安装 APK、启动 Suwayomi Server 或调用上游 ExtensionHost。运行时 JAR 以明确的编号维持 classpath 顺序，
 保留独立的 serialization-json-okio 与 coroutines-jdk8 适配包；共享基础 Kotlin/JSON/coroutines 使用本项目版本。
-生成目录为 `iosApp/build/jvm-real-api`，`inventory.json` 记录每个本地产物的摘要。
+生成目录为 `iosApp/build/jvm-real-api`，`runtime-origin.json` 记录 OpenJDK 构建来源，`inventory.json` 记录产物摘要。
+`00-kototoro-ios-shims.jar` 首先加载，通过本项目 JNI 桥使用 ImageIO、CoreText、CoreGraphics 与 JavaScriptCore。
+独立验证这些能力：`python3 "iosApp/Scripts/test-ios-shims.py"`。现有基础依赖仍按各自许可使用，自写 shim 不重新许可它们。
 
 ```bash
 xcodebuild -project "iosApp/Kototoro.xcodeproj" -scheme Kototoro \

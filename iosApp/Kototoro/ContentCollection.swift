@@ -169,6 +169,9 @@ struct ContentCollection<Destination: View, Actions: View>: View {
     var onItemAppear: ((ContentItem) -> Void)?
     /// The library itself does not mark its own works as favourites.
     var marksFavourites = true
+    /// A non-nil set replaces navigation with selection, using the same source/id keys as library marks.
+    var selectedKeys: Set<String>? = nil
+    var onSelect: ((ContentItem) -> Void)? = nil
     @ViewBuilder let destination: (ContentItem) -> Destination
     @ViewBuilder let actions: (ContentItem) -> Actions
 
@@ -230,10 +233,33 @@ struct ContentCollection<Destination: View, Actions: View>: View {
     }
 
     private func link(_ item: ContentItem, @ViewBuilder label: () -> some View) -> some View {
-        NavigationLink { destination(item) } label: { label().contentShape(Rectangle()) }
+        Group {
+            if let selectedKeys {
+                let selected = selectedKeys.contains(ContentMarks.key(item.content))
+                Button { onSelect?(item) } label: {
+                    label()
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .strokeBorder(selected ? Color.accentColor : .clear, lineWidth: 3)
+                        }
+                        .overlay(alignment: .topTrailing) {
+                            Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                                .font(.title2)
+                                .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                                .background(.background, in: .circle)
+                                .padding(6)
+                        }
+                        .contentShape(Rectangle())
+                }
+                .accessibilityAddTraits(selected ? .isSelected : [])
+                .accessibilityValue(selected ? "已选中" : "未选中")
+            } else {
+                NavigationLink { destination(item) } label: { label().contentShape(Rectangle()) }
+            }
+        }
             .buttonStyle(.plain)
             .accessibilityIdentifier("\(identifierPrefix)\(item.id)")
-            .contextMenu { actions(item) }
+            .contextMenu { if selectedKeys == nil { actions(item) } }
             // A new layout needs a new menu interaction rather than the previous cell's UIKit registration.
             .id("\(identifierPrefix)\(item.id).\(mode.rawValue)")
             .onAppear { onItemAppear?(item) }

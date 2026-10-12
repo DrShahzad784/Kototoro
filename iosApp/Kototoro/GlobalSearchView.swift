@@ -90,7 +90,6 @@ struct GlobalSearchView: View {
     @EnvironmentObject private var sources: SourcesModel
     @StateObject private var model = GlobalSearchModel()
     @Binding var query: String
-    let submission: Int
     @AppStorage("search.recent") private var storedRecent = ""
     @AppStorage("search.kinds") private var hiddenKinds = ""
     @AppStorage("search.pinnedOnly") private var pinnedOnly = false
@@ -112,7 +111,8 @@ struct GlobalSearchView: View {
                 ToolbarItem(placement: .topBarTrailing) { filterMenu }
             }
         }
-        .onChange(of: submission) { _, _ in submit(query) }
+        .searchable(text: $query, prompt: "搜索全部来源中的作品")
+        .onSubmit(of: .search) { submit(query) }
         .onChange(of: query) { _, value in
             if value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { model.cancel() }
         }

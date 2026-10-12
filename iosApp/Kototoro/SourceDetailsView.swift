@@ -143,7 +143,12 @@ struct SourceDetailsView: View {
         .listStyle(.insetGrouped)
         .listSectionSpacing(.compact)
         .scrollContentBackground(.hidden)
-        .background { backdrop }
+        .backgroundPreferenceValue(DetailsCoverBoundsKey.self) { bounds in
+            GeometryReader { geometry in
+                backdrop(coverBottom: bounds.map { geometry[$0].maxY + scrollOffset })
+            }
+            .ignoresSafeArea()
+        }
         .onScrollGeometryChange(for: CGFloat.self, of: { $0.contentOffset.y + $0.contentInsets.top }) { _, offset in
             scrollOffset = offset
         }
@@ -174,7 +179,9 @@ struct SourceDetailsView: View {
                 }
             }
         }
-        .sheet(isPresented: $editingCategories) { FavouriteCategoriesView(content: model.details ?? model.content) }
+        .sheet(isPresented: $editingCategories, onDismiss: { Task { await refreshRecords() } }) {
+            FavouriteCategoriesView(content: model.details ?? model.content)
+        }
         .onChange(of: reading == nil) { _, closed in if closed { Task { await refreshRecords() } } }
         .navigationDestination(item: $reading) { request in
             if model.isNovel { NovelReaderView(runtime: model.runtime, content: request.content, chapter: request.chapter) }
@@ -185,13 +192,13 @@ struct SourceDetailsView: View {
         }
     }
 
-    private func toggleFavourite() {
+    private func removeFavourite() {
         Task {
             savingFavourite = true
             defer { savingFavourite = false }
             do {
-                try await library.setFavourite(model.details ?? model.content, favourite: !isFavourite)
-                isFavourite.toggle()
+                try await library.setFavourite(model.details ?? model.content, favourite: false)
+                isFavourite = false
             } catch { recordError = error.localizedDescription }
         }
     }
@@ -220,6 +227,7 @@ struct SourceDetailsView: View {
                         .shadow(color: .black.opacity(0.25), radius: 10, y: 4)
                         .accessibilityLabel("封面")
                         .accessibilityIdentifier("details.cover")
+                        .anchorPreference(key: DetailsCoverBoundsKey.self, value: .bounds) { $0 }
                     VStack(alignment: .leading, spacing: 6) {
                         Text(shown.title).font(.title3.weight(.bold)).lineLimit(4)
                             .textSelection(.enabled)
@@ -278,11 +286,12 @@ struct SourceDetailsView: View {
 
     /// Android's panorama cover at the top (or the softly blurred cover when it is turned off), faded into the
     /// grouped background.
-    private var backdrop: some View {
+    private func backdrop(coverBottom: CGFloat?) -> some View {
         ZStack(alignment: .top) {
             Color(uiColor: .systemGroupedBackground)
             if panorama {
-                DetailsPanorama(runtime: model.runtime, content: model.details ?? model.content, scrollOffset: scrollOffset)
+                DetailsPanorama(runtime: model.runtime, content: model.details ?? model.content,
+                                scrollOffset: scrollOffset, coverBottom: coverBottom)
             } else {
                 CoverImage(runtime: model.runtime, content: model.details ?? model.content, plain: true)
                     .frame(height: 420).frame(maxWidth: .infinity)
@@ -290,7 +299,6 @@ struct SourceDetailsView: View {
                     .mask(LinearGradient(colors: [.black, .black.opacity(0.6), .clear], startPoint: .top, endPoint: .bottom))
             }
         }
-        .ignoresSafeArea()
         .allowsHitTesting(false)
         .accessibilityHidden(true)
     }
@@ -320,7 +328,9 @@ struct SourceDetailsView: View {
                 Button {} label: { primaryLabel(model.isVideo ? "开始播放" : "开始阅读", subtitle: nil, icon: "book.fill") }
                     .buttonStyle(.glassProminent).disabled(true)
             }
-            Button(isFavourite ? "取消收藏" : "收藏", systemImage: isFavourite ? "heart.fill" : "heart", action: toggleFavourite)
+            Button(isFavourite ? "整理收藏" : "收藏", systemImage: isFavourite ? "heart.fill" : "heart") {
+                editingCategories = true
+            }
                 .labelStyle(.iconOnly)
                 .font(.title3)
                 .foregroundStyle(isFavourite ? Color.pink : Color.primary)
@@ -329,7 +339,10 @@ struct SourceDetailsView: View {
                 .accessibilityIdentifier("details.favourite")
                 .disabled(model.details == nil || savingFavourite)
                 .contextMenu {
-                    if isFavourite { Button("整理分类", systemImage: "folder") { editingCategories = true } }
+                    Button("收藏分类", systemImage: "folder") { editingCategories = true }
+                    if isFavourite {
+                        Button("取消收藏", systemImage: "heart.slash", role: .destructive, action: removeFavourite)
+                    }
                 }
         }
     }

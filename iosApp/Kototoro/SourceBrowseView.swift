@@ -150,11 +150,17 @@ final class SourceBrowseModel: ObservableObject {
 struct SourceBrowseView: View {
     @StateObject private var model: SourceBrowseModel
     @EnvironmentObject private var sources: SourcesModel
+    @EnvironmentObject private var library: LibraryModel
     @Environment(\.isSearching) private var isSearching
     @State private var editingFilter = false
     @State private var settingsOpen = false
     @State private var importingFiles = false
     @State private var importMessage: String?
+    @State private var searchPresented = false
+    @State private var selecting = false
+    @State private var selectedKeys: Set<String> = []
+    @State private var favouriteRequest: FavouriteCategoryRequest?
+    @State private var favouriteError: String?
 
     /// Imported files (本地漫画 / 本地小说): an import button instead of source settings.
     private var isLocal: Bool { model.source.ecosystem == "LOCAL" }
@@ -167,14 +173,38 @@ struct SourceBrowseView: View {
 
     var body: some View {
         ScrollView {
-            categoryBar
+            categoryBar.disabled(selecting)
             ContentCollection(runtime: model.runtime, items: model.items.map { ContentItem(content: $0) }, mode: mode,
                               identifierPrefix: "source.content.",
                               onItemAppear: { item in
                                   if item.id == model.items.last?.id, model.error == nil { Task { await model.loadMore() } }
+                              }, selectedKeys: selecting ? selectedKeys : nil,
+                              onSelect: { item in
+                                  let key = ContentMarks.key(item.content)
+                                  if selectedKeys.contains(key) { selectedKeys.remove(key) }
+                                  else { selectedKeys.insert(key) }
                               }) { item in
                 SourceDetailsView(runtime: model.runtime, content: item.content)
             } actions: { item in
+                let favourited = library.favourites.contains { ContentMarks.key($0.content) == ContentMarks.key(item.content) }
+                Button(favourited ? "整理收藏" : "收藏", systemImage: favourited ? "heart.fill" : "heart") {
+                    favouriteRequest = FavouriteCategoryRequest(contents: [item.content])
+                }
+                .accessibilityIdentifier("browse.favourite")
+                Button("选择多个", systemImage: "checkmark.circle") {
+                    searchPresented = false
+                    selectedKeys = [ContentMarks.key(item.content)]
+                    selecting = true
+                }
+                .accessibilityIdentifier("browse.select")
+                if favourited {
+                    Button("取消收藏", systemImage: "heart.slash", role: .destructive) {
+                        Task {
+                            do { try await library.setFavourite(item.content, favourite: false) }
+                            catch { favouriteError = error.localizedDescription }
+                        }
+                    }
+                }
                 if let url = URL(string: item.content.publicUrl), url.scheme?.hasPrefix("http") == true {
                     ShareLink(item: url) { Label("分享", systemImage: "square.and.arrow.up") }
                 }
@@ -189,35 +219,64 @@ struct SourceBrowseView: View {
             }
             footer
         }
-        .navigationTitle(model.source.title)
+        .navigationTitle(selecting ? "已选择 \(selectedKeys.count) 部" : model.source.title)
         .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(selecting)
         // A search button in the toolbar (top right), as standard iOS list screens do, instead of a drawer.
-        .searchable(text: $model.query, placement: .toolbar, prompt: "在\(model.source.title)中搜索")
+        .searchable(text: $model.query, isPresented: $searchPresented, placement: .toolbar,
+                    prompt: "在\(model.source.title)中搜索")
         .searchToolbarBehavior(.minimize)
+        .toolbar(removing: selecting ? .search : nil)
         .onSubmit(of: .search) { Task { await model.submitSearch() } }
         .onChange(of: model.query) { _, value in
             if value.isEmpty { Task { await model.clearSearch() } }
         }
         .refreshable { await model.reload() }
+        .onChange(of: model.items.map(ContentMarks.key)) { _, keys in selectedKeys.formIntersection(keys) }
         .task {
             await sources.recordUsage(sourceName: model.source.name)
             await model.start()
         }
         .toolbar {
-            // The minimized search sits with the other actions at the top right.
-            DefaultToolbarItem(kind: .search, placement: .topBarTrailing)
-            ToolbarItem(placement: .topBarTrailing) { ContentListModeMenu(mode: $mode) }
-            // Filtering stays on the chip at the start of the category row; the toolbar opens the source's settings.
-            ToolbarItem(placement: .topBarTrailing) {
-                if isLocal {
-                    Button("导入文件", systemImage: "plus") { importingFiles = true }
-                        .accessibilityIdentifier("browse.importLocal")
-                } else {
-                    Button("来源设置", systemImage: "gearshape") { settingsOpen = true }
-                        .accessibilityIdentifier("browse.settings")
+            if selecting {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("退出多选", systemImage: "xmark") { clearSelection() }
+                        .accessibilityIdentifier("browse.selection.cancel")
+                }
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button(selectedKeys.count == model.items.count ? "取消全选" : "全选") {
+                        selectedKeys = selectedKeys.count == model.items.count ? [] : Set(model.items.map(ContentMarks.key))
+                    }
+                    .accessibilityIdentifier("browse.selection.all")
+                    Button("收藏分类", systemImage: "heart") {
+                        favouriteRequest = FavouriteCategoryRequest(
+                            contents: model.items.filter { selectedKeys.contains(ContentMarks.key($0)) })
+                    }
+                    .disabled(selectedKeys.isEmpty)
+                    .accessibilityIdentifier("browse.selection.favourite")
+                }
+            } else {
+                // The minimized search sits with the other actions at the top right.
+                DefaultToolbarItem(kind: .search, placement: .topBarTrailing)
+                ToolbarItem(placement: .topBarTrailing) { ContentListModeMenu(mode: $mode) }
+                // Filtering stays on the chip at the start of the category row; the toolbar opens the source's settings.
+                ToolbarItem(placement: .topBarTrailing) {
+                    if isLocal {
+                        Button("导入文件", systemImage: "plus") { importingFiles = true }
+                            .accessibilityIdentifier("browse.importLocal")
+                    } else {
+                        Button("来源设置", systemImage: "gearshape") { settingsOpen = true }
+                            .accessibilityIdentifier("browse.settings")
+                    }
                 }
             }
         }
+        .sheet(item: $favouriteRequest) { request in
+            FavouriteCategoriesView(contents: request.contents, onSaved: { clearSelection() })
+        }
+        .alert("收藏失败", isPresented: Binding(get: { favouriteError != nil }, set: { if !$0 { favouriteError = nil } })) {
+            Button("好") { favouriteError = nil }
+        } message: { Text(favouriteError ?? "") }
         .fileImporter(isPresented: $importingFiles, allowedContentTypes: LocalImport.contentTypes,
                       allowsMultipleSelection: true) { result in
             guard case .success(let urls) = result else { return }
@@ -241,6 +300,11 @@ struct SourceBrowseView: View {
                 FilterPanelPlaceholder(error: model.panelError) { await model.loadCategories() }
             }
         }
+    }
+
+    private func clearSelection() {
+        selecting = false
+        selectedKeys.removeAll()
     }
 
 

@@ -41,25 +41,37 @@ enum PanoramaKeys {
     static let scrollLinked = "details.panorama.scrollLinked"
 }
 
+struct DetailsCoverBoundsKey: PreferenceKey {
+    static let defaultValue: Anchor<CGRect>? = nil
+
+    static func reduce(value: inout Anchor<CGRect>?, nextValue: () -> Anchor<CGRect>?) {
+        value = nextValue() ?? value
+    }
+}
+
 /// The cover as a wide panorama behind the details header. [scrollOffset] is the list's offset from its resting
 /// position: positive scrolls the banner away with the content, negative (pull to refresh) stretches it.
 struct DetailsPanorama: View {
     let runtime: IosSources
     let content: IosSourceContent
     let scrollOffset: CGFloat
+    let coverBottom: CGFloat?
     @AppStorage(PanoramaKeys.preset) private var preset = PanoramaPreset.balanced
     @AppStorage(PanoramaKeys.layout) private var layout = PanoramaLayout.top
     @AppStorage(PanoramaKeys.animated) private var animated = true
     @AppStorage(PanoramaKeys.scrollLinked) private var scrollLinked = true
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var drifting = false
+    @State private var lastCoverBottom: CGFloat?
+    private static let fadeEnd = 0.96
 
     var body: some View {
         GeometryReader { geometry in
             let values = preset.values(layout)
             let screen = geometry.size.height
-            // The banner reaches down behind the title block and dissolves around the action row.
-            let base = layout == .top ? min(max(geometry.size.width * 0.95, 340), screen * 0.5) : screen
+            // Resolve the fade's endpoint against the card, retaining its height when List recycles the header.
+            let bottom = coverBottom ?? lastCoverBottom ?? 0
+            let base = layout == .top ? max(bottom, 0) / Self.fadeEnd : screen
             let stretch = max(-scrollOffset, 0)
             let follows = layout == .top && scrollLinked
             let motion = animated && !reduceMotion
@@ -75,6 +87,9 @@ struct DetailsPanorama: View {
                 .offset(y: follows ? -max(scrollOffset, 0) : 0)
         }
         .onAppear { startDrift() }
+        .onChange(of: coverBottom, initial: true) { _, bottom in
+            if let bottom, bottom > 0 { lastCoverBottom = bottom }
+        }
         .onChange(of: animated) { _, _ in startDrift() }
         .accessibilityHidden(true)
         .allowsHitTesting(false)
@@ -89,13 +104,13 @@ struct DetailsPanorama: View {
     /// Opaque at the top, dissolving into the page below; a wider range starts the fade earlier.
     static func fade(range: Double) -> LinearGradient {
         let start = 0.82 - (0.82 - 0.18) * min(max(range, 0), 1)
-        let length = 0.96 - start
+        let length = fadeEnd - start
         return LinearGradient(stops: [
             .init(color: .black, location: 0),
             .init(color: .black, location: start),
             .init(color: .black.opacity(0.82), location: start + length * 0.35),
             .init(color: .black.opacity(0.28), location: start + length * 0.70),
-            .init(color: .clear, location: 0.96),
+            .init(color: .clear, location: fadeEnd),
             .init(color: .clear, location: 1),
         ], startPoint: .top, endPoint: .bottom)
     }

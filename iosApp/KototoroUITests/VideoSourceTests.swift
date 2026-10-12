@@ -498,6 +498,8 @@ func importVideoSite(_ app: XCUIApplication, url: String, title: String?, timeou
         let field = app.textFields["repository.title"]
         XCTAssertTrue(field.waitForExistence(timeout: 5), app.debugDescription)
         field.tap()
+        // The first tap can land while the address field still holds focus; tap again until this one takes it.
+        for _ in 0..<3 where (field.value(forKey: "hasKeyboardFocus") as? Bool) != true { sleep(1); field.tap() }
         field.typeText(title)
     }
     app.buttons["repository.import"].tap()

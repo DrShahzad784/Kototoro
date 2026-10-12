@@ -13,7 +13,6 @@ struct ContentView: View {
     @State private var openedFileMessage: String?
     @State private var globalSearchQuery = ""
     @State private var selectedTab = MainTab.library
-    @State private var searchSubmission = 0
     @State private var resumed: CategoryContent?
     @AppStorage(ContentSpace.key) private var space = ""
     @AppStorage(ContentSpace.enabledKey) private var spacesEnabled = true
@@ -64,14 +63,12 @@ struct ContentView: View {
             }
             // The system's separate search button at the trailing end of the tab bar (iOS 26).
             Tab(value: MainTab.search, role: .search) {
-                GlobalSearchView(query: $globalSearchQuery, submission: searchSubmission)
+                GlobalSearchView(query: $globalSearchQuery)
             }
         }
-        .searchable(text: $globalSearchQuery, prompt: "搜索全部来源中的作品")
+        // The global search belongs to its own tab: `.searchable` on the TabView is inherited by every tab's
+        // navigation bar and showed a second search field under the library and browse titles.
         .tabViewSearchActivation(.searchTabSelection)
-        .onSubmit(of: .search) {
-            if selectedTab == .search { searchSubmission += 1 }
-        }
         .tabBarMinimizeBehavior(.onScrollDown)
         .continueReadingAccessory(
             enabled: !ReaderPresence.shared.isReading &&
@@ -127,43 +124,128 @@ struct ContentView: View {
     }
 }
 
+struct FavouriteCategoryRequest: Identifiable {
+    let id = UUID()
+    let contents: [IosSourceContent]
+}
+
 struct FavouriteCategoriesView: View {
-    let content: IosSourceContent
+    let contents: [IosSourceContent]
+    let onSaved: (() -> Void)?
     @EnvironmentObject private var library: LibraryModel
     @Environment(\.dismiss) private var dismiss
-    @State private var selected: Set<Int32> = []
+    @State private var memberships: [String: Set<Int32>] = [:]
+    @State private var changes: [Int32: Bool] = [:]
+    @State private var loading = true
     @State private var error: String?
     @State private var saving = false
+    @State private var addingCategory = false
+    @State private var categoryTitle = ""
+
+    init(content: IosSourceContent) { contents = [content]; onSaved = nil }
+    init(contents: [IosSourceContent], onSaved: (() -> Void)? = nil) {
+        self.contents = contents
+        self.onSaved = onSaved
+    }
+
+    private enum CheckState { case none, partial, all }
+
+    private func checkState(_ id: Int32) -> CheckState {
+        if let changed = changes[id] { return changed ? .all : .none }
+        let count = contents.filter { memberships[ContentMarks.key($0)]?.contains(id) == true }.count
+        return count == 0 ? .none : count == contents.count ? .all : .partial
+    }
+
+    private func toggle(_ id: Int32) {
+        let checked = checkState(id) != .all
+        let count = contents.filter { memberships[ContentMarks.key($0)]?.contains(id) == true }.count
+        if (checked && count == contents.count) || (!checked && count == 0) { changes.removeValue(forKey: id) }
+        else { changes[id] = checked }
+    }
+
     var body: some View {
         NavigationStack {
             List {
-                ForEach(library.categories, id: \.id) { category in
-                    Toggle(category.title, isOn: Binding(get: { selected.contains(category.id) }, set: {
-                        if $0 { selected.insert(category.id) } else { selected.remove(category.id) }
-                    }))
+                Section {
+                    Text(contents.count == 1 ? contents[0].title : "已选择 \(contents.count) 部作品")
+                        .font(.headline)
+                    if loading { ProgressView("正在读取分类…") }
+                    else {
+                        if library.categories.isEmpty { Text("暂无分类，请先新建分类。") .foregroundStyle(.secondary) }
+                        ForEach(library.categories, id: \.id) { category in
+                            let state = checkState(category.id)
+                            Button { toggle(category.id) } label: {
+                                HStack {
+                                    Text(category.title).foregroundStyle(.primary)
+                                    Spacer()
+                                    Image(systemName: state == .all ? "checkmark.circle.fill"
+                                          : state == .partial ? "minus.circle.fill" : "circle")
+                                        .foregroundStyle(state == .none ? Color.secondary : Color.accentColor)
+                                        .accessibilityHidden(true)
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .accessibilityIdentifier("favourite.category.\(category.id)")
+                            .accessibilityValue(state == .all ? "已选中" : state == .partial ? "部分选中" : "未选中")
+                            .accessibilityAddTraits(state == .all ? .isSelected : [])
+                        }
+                    }
                 }
+                Button("新建分类", systemImage: "folder.badge.plus") { categoryTitle = ""; addingCategory = true }
+                    .accessibilityIdentifier("favourite.category.add")
+                    .disabled(loading || saving)
                 if let error { Text(error).foregroundStyle(.red) }
-                Text("移除全部分类会取消收藏。").font(.caption).foregroundStyle(.secondary)
+                Text("可选择多个分类。未操作的分类保持原样；移除作品的全部分类会取消收藏。")
+                    .font(.caption).foregroundStyle(.secondary)
             }
-            .navigationTitle("整理分类")
+            .disabled(saving)
+            .navigationTitle("收藏分类")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }.disabled(saving).accessibilityIdentifier("favourite.cancel")
+                }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("保存") {
                         saving = true
                         Task {
                             do {
-                                try await library.library?.setCategories(content: content, categoryIds: selected.map { KotlinInt(value: $0) })
-                                await library.refresh(); dismiss()
+                                try await library.updateCategories(contents, changes: changes)
+                                onSaved?()
+                                dismiss()
                             } catch { self.error = error.localizedDescription }
                             saving = false
                         }
-                    }.disabled(saving)
+                    }.disabled(saving || loading || changes.isEmpty)
+                        .accessibilityIdentifier("favourite.save")
                 }
             }
             .task {
-                do { selected = Set(try await library.library?.favouriteCategories(content: content).map(\.int32Value) ?? []) }
+                do {
+                    guard let database = library.library else { throw CancellationError() }
+                    let entries = try await database.favourites()
+                    memberships = Dictionary(entries.map { (ContentMarks.key($0.content), Set($0.categoryIds.map(\.int32Value))) },
+                                             uniquingKeysWith: { first, _ in first })
+                    loading = false
+                }
                 catch { self.error = error.localizedDescription }
+            }
+            .interactiveDismissDisabled(saving)
+            .alert("新建分类", isPresented: $addingCategory) {
+                TextField("分类名称", text: $categoryTitle).accessibilityIdentifier("favourite.category.title")
+                Button("取消", role: .cancel) {}
+                Button("创建") {
+                    saving = true
+                    Task {
+                        let known = Set(library.categories.map(\.id))
+                        if await library.addCategory(categoryTitle) {
+                            if let category = library.categories.first(where: { !known.contains($0.id) }) {
+                                changes[category.id] = true
+                            }
+                        } else { error = library.error }
+                        saving = false
+                    }
+                }.disabled(categoryTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
     }

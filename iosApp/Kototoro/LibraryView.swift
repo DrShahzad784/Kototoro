@@ -41,6 +41,8 @@ struct LibraryView: View {
     @State private var deleting: IosCategory?
     @State private var categoryContent: CategoryContent?
     @State private var managingCategories = false
+    /// Where the next category's works come in from: the trailing edge when moving forward.
+    @State private var swipeEdge: Edge = .trailing
 
     private var visibleCategories: [IosCategory] { library.categories.filter(\.isVisibleInLibrary) }
     private var availableKinds: Set<String> { Set(library.favourites.map(\.content.mediaKind)) }
@@ -55,21 +57,33 @@ struct LibraryView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    // In the page rather than a floating bar: the navigation bar takes a horizontal scroll view in a
-                    // top bar for the page's own, blurring the large title and fading the chips out at rest.
-                    if library.schemaVersion != nil { categoryBar }
-                    if !spacesEnabled && ContentKindPicker.isShown(availableKinds) {
-                        ContentKindPicker(selection: $pageKind, available: availableKinds).padding(.horizontal)
+                // The categories are the pinned header of the page's own scroll view: they stay at the top while the
+                // works scroll. A floating top bar would not do: the navigation bar takes a horizontal scroll view
+                // there for the page's own, blurring the large title and fading the chips out at rest.
+                LazyVStack(alignment: .leading, spacing: 14, pinnedViews: [.sectionHeaders]) {
+                    Section {
+                        if !spacesEnabled && ContentKindPicker.isShown(availableKinds) {
+                            ContentKindPicker(selection: $pageKind, available: availableKinds).padding(.horizontal)
+                        }
+                        if let error = library.error, !library.favourites.isEmpty {
+                            Label(error, systemImage: "exclamationmark.triangle").font(.footnote).foregroundStyle(.red)
+                                .padding(.horizontal)
+                        }
+                        content
+                            .id(selectedCategory)
+                            .transition(.asymmetric(insertion: .move(edge: swipeEdge), removal: .opacity))
+                    } header: {
+                        if library.schemaVersion != nil {
+                            categoryBar
+                                .padding(.vertical, 6)
+                                .background(Color(uiColor: .systemGroupedBackground).opacity(0.92))
+                        }
                     }
-                    if let error = library.error, !library.favourites.isEmpty {
-                        Label(error, systemImage: "exclamationmark.triangle").font(.footnote).foregroundStyle(.red)
-                            .padding(.horizontal)
-                    }
-                    content
                 }
                 .padding(.bottom, 24)
             }
+            // Swiping sideways over the works moves to the previous / next category, like the chips do.
+            .gesture(HorizontalSwipeGesture(onEnded: swipe))
             .background(Color(uiColor: .systemGroupedBackground))
             .navigationTitle("作品库")
             .navigationSubtitle(spacesEnabled ? ContentSpace.subtitle(space) : "")
@@ -113,21 +127,42 @@ struct LibraryView: View {
 
     // MARK: Categories
 
+    /// 全部 followed by the visible categories, in chip order.
+    private var categoryOrder: [Int32?] { [nil] + visibleCategories.map { Optional($0.id) } }
+
+    private func swipe(_ dx: CGFloat) {
+        guard abs(dx) > 60, let index = categoryOrder.firstIndex(of: selectedCategory) else { return }
+        let next = index + (dx < 0 ? 1 : -1)
+        guard categoryOrder.indices.contains(next) else { return }
+        withAnimation(.snappy) { select(categoryOrder[next]) }
+    }
+
+    /// Works slide in from the side the category lies on, so chips and swipes read the same way.
+    private func select(_ category: Int32?) {
+        let from = categoryOrder.firstIndex(of: selectedCategory) ?? 0
+        let to = categoryOrder.firstIndex(of: category) ?? 0
+        swipeEdge = to >= from ? .trailing : .leading
+        selectedCategory = category
+    }
+
     /// Visible categories in one scrollable row with counts; long-press a chip to rename or delete it.
     private var categoryBar: some View {
         HStack(spacing: 8) {
             // Each glass container stays inside its own bounds: one spanning the scroll view would draw the chips'
             // glass past the scroll edge and merge it with the actions.
+            ScrollViewReader { chips in
             ScrollView(.horizontal, showsIndicators: false) {
                 GlassEffectContainer(spacing: 8) {
                     HStack(spacing: 8) {
-                        chip("全部", count: kindFavourites.count, selected: selectedCategory == nil) { selectedCategory = nil }
+                        chip("全部", count: kindFavourites.count, selected: selectedCategory == nil) { select(nil) }
                             .accessibilityIdentifier("category.all")
+                            .id(Int32?.none)
                         ForEach(visibleCategories, id: \.id) { category in
                             chip(category.title, count: count(category.id), selected: selectedCategory == category.id) {
-                                selectedCategory = selectedCategory == category.id ? nil : category.id
+                                select(selectedCategory == category.id ? nil : category.id)
                             }
                             .accessibilityIdentifier("category.\(category.id)")
+                            .id(Optional(category.id))
                             .contextMenu {
                                 Button("重命名", systemImage: "pencil") { editor = CategoryEditor(category: category.id, title: category.title) }
                                 Button("删除分类", systemImage: "trash", role: .destructive) { deleting = category }
@@ -137,6 +172,10 @@ struct LibraryView: View {
                     .padding(.leading)
                     .padding(.vertical, 4)
                 }
+            }
+            .onChange(of: selectedCategory) { _, selected in
+                withAnimation(.snappy) { chips.scrollTo(selected, anchor: .center) }
+            }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             // Category actions stay at the trailing end, beside the categories rather than in the toolbar.
@@ -164,7 +203,11 @@ struct LibraryView: View {
                 Text("\(count)").font(.caption.monospacedDigit()).foregroundStyle(selected ? .white.opacity(0.8) : .secondary)
             }
         }
-        if selected { button.buttonStyle(.glassProminent) } else { button.buttonStyle(.glass) }
+        if selected {
+            button.buttonStyle(.glassProminent).accessibilityAddTraits(.isSelected)
+        } else {
+            button.buttonStyle(.glass)
+        }
     }
 
     private func count(_ category: Int32) -> Int {
@@ -212,7 +255,7 @@ struct LibraryView: View {
                     SpaceEmptyView(what: "收藏").padding(.top, 40)
                 } else if query.trimmingCharacters(in: .whitespaces).isEmpty {
                     ContentUnavailableView("这个分类还没有作品", systemImage: "folder",
-                                           description: Text("在作品详情页的“整理分类”中加入。"))
+                                           description: Text("在来源列表长按作品，或在详情页点收藏时选择分类。"))
                         .padding(.top, 40)
                 } else {
                     ContentUnavailableView.search(text: query).padding(.top, 40)
@@ -329,5 +372,52 @@ private struct CategoryEditorSheet: View {
             .interactiveDismissDisabled(saving)
         }
         .presentationDetents([.medium])
+    }
+}
+
+/// A horizontal page swipe that wins over the works' taps. A SwiftUI drag runs beside the cells' navigation links,
+/// so lifting the finger at the end of a swipe still opened the work under it; a UIKit pan cancels the touches it
+/// takes, so the links never see that touch end. Vertical drags and the chips' own horizontal scroll are left alone.
+struct HorizontalSwipeGesture: UIGestureRecognizerRepresentable {
+    /// Receives the horizontal translation once the swipe ends.
+    let onEnded: (CGFloat) -> Void
+
+    func makeUIGestureRecognizer(context: Context) -> UIPanGestureRecognizer {
+        let pan = UIPanGestureRecognizer()
+        pan.delegate = context.coordinator
+        return pan
+    }
+
+    func makeCoordinator(converter: CoordinateSpaceConverter) -> Coordinator { Coordinator() }
+
+    func handleUIGestureRecognizerAction(_ recognizer: UIPanGestureRecognizer, context: Context) {
+        if recognizer.state == .ended { onEnded(recognizer.translation(in: recognizer.view).x) }
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
+            guard let pan = recognizer as? UIPanGestureRecognizer else { return false }
+            // The pan begins after a few points of movement; that movement says more than an instantaneous velocity.
+            var motion = pan.translation(in: pan.view)
+            if motion == .zero { motion = pan.velocity(in: pan.view) }
+            return abs(motion.x) > abs(motion.y) * 1.5
+        }
+
+        /// Touches in a horizontally scrolling view (the category chips) scroll that view instead.
+        func gestureRecognizer(_ recognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            var view = touch.view
+            while let current = view {
+                if let scroll = current as? UIScrollView,
+                   scroll.contentSize.width > scroll.bounds.width + 1 { return false }
+                view = current.superview
+            }
+            return true
+        }
+
+        /// The page's vertical scroll keeps running; any other gesture (a cell's tap) gives way.
+        func gestureRecognizer(_ recognizer: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            other.view is UIScrollView && other is UIPanGestureRecognizer
+        }
     }
 }

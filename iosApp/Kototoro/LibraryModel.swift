@@ -102,6 +102,14 @@ final class LibraryModel: ObservableObject {
         try await refreshRecords()
     }
 
+    func updateCategories(_ contents: [IosSourceContent], changes: [Int32: Bool]) async throws {
+        guard let library else { throw CancellationError() }
+        try await library.updateCategories(contents: contents,
+            included: changes.filter { $0.value }.keys.map { KotlinInt(value: $0) },
+            excluded: changes.filter { !$0.value }.keys.map { KotlinInt(value: $0) })
+        try await refreshRecords()
+    }
+
     func removeHistory(_ content: IosSourceContent) async {
         do { try await library?.removeHistory(content: content); try await refreshRecords() }
         catch { self.error = error.localizedDescription }

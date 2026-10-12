@@ -1,6 +1,147 @@
 import XCTest
 
 final class ProductFlowTests: XCTestCase {
+    @MainActor
+    func testBrowseAndDetailsShareMultiCategoryFavouritesAndBulkSelection() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-space.enabled", "NO", "-listMode.browse", "grid"]
+        app.launch()
+        let run = String(UUID().uuidString.prefix(6))
+        let names = ["待读 \(run)", "在读 \(run)", "合集 \(run)"]
+        app.mainTab("作品库").tap()
+        for name in names {
+            let addCategory = app.buttons["category.add"]
+            XCTAssertTrue(addCategory.waitForExistence(timeout: 30))
+            expectation(for: NSPredicate(format: "enabled == true"), evaluatedWith: addCategory)
+            waitForExpectations(timeout: 30)
+            addCategory.tap()
+            let field = app.textFields["category.title"]
+            XCTAssertTrue(field.waitForExistence(timeout: 5))
+            field.tap(); field.typeText(name)
+            app.buttons["category.save"].tap()
+            XCTAssertTrue(field.waitForNonExistence(timeout: 10))
+        }
+        let siteName = "收藏操作 \(run)"
+        importVideoSite(app, url: "http://127.0.0.1:8765/api.php/provide/vod/?favourites=\(run)", title: siteName)
+        let search = app.pageSearchField()
+        XCTAssertTrue(search.waitForExistence(timeout: 10))
+        search.tap(); search.typeText(siteName)
+        let source = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@",
+                                                      "source.JSON_TVBOX_", siteName)).firstMatch
+        XCTAssertTrue(source.waitForExistence(timeout: 20)); source.tap()
+        func work(_ title: String) -> XCUIElement {
+            app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@",
+                                             "source.content.", title)).firstMatch
+        }
+        /// The dialog's list is lazy and test devices keep earlier runs' categories, so scroll the row into view.
+        func category(_ title: String) -> XCUIElement {
+            let row = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@",
+                                                       "favourite.category.", title)).firstMatch
+            let any = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "favourite.category.")).firstMatch
+            guard any.waitForExistence(timeout: 10) else { return row }
+            // The new categories are the last rows: drag the list upward until the row can be tapped.
+            for _ in 0..<20 where !row.isHittable {
+                app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75))
+                    .press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35)))
+            }
+            return row
+        }
+        func openCategories(_ title: String) {
+            let item = work(title)
+            XCTAssertTrue(item.waitForExistence(timeout: 20), app.debugDescription)
+            item.press(forDuration: 0.8)
+            XCTAssertTrue(app.buttons["browse.favourite"].waitForExistence(timeout: 5))
+            app.buttons["browse.favourite"].tap()
+            XCTAssertTrue(category(names[0]).waitForExistence(timeout: 10))
+        }
+        func save() {
+            XCTAssertTrue(app.buttons["favourite.save"].isEnabled, app.debugDescription)
+            app.buttons["favourite.save"].tap()
+            XCTAssertTrue(app.buttons["favourite.save"].waitForNonExistence(timeout: 10))
+        }
+        openCategories("测试动画")
+        XCTAssertEqual(category(names[0]).value as? String, "未选中")
+        category(names[0]).tap()
+        app.buttons["favourite.cancel"].tap()
+        XCTAssertTrue(app.buttons["favourite.cancel"].waitForNonExistence(timeout: 5))
+        openCategories("测试动画")
+        XCTAssertEqual(category(names[0]).value as? String, "未选中", "Cancel must not favourite the work")
+        category(names[0]).tap(); category(names[1]).tap(); save()
+
+        // Exercise the same selection controls in rows after adding from the grid's context menu.
+        app.buttons["list.mode"].tap()
+        tapMenuItem(app, "列表")
+        app.buttons["list.options.done"].tap()
+        work("测试动画").press(forDuration: 0.8)
+        XCTAssertTrue(app.buttons["browse.select"].waitForExistence(timeout: 5))
+        app.buttons["browse.select"].tap()
+        XCTAssertTrue(app.buttons["browse.selection.cancel"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["list.mode"].exists)
+        XCTAssertFalse(app.buttons["browse.settings"].exists)
+        work("测试电影").tap()
+        XCTAssertTrue(work("测试动画").isSelected && work("测试电影").isSelected, app.debugDescription)
+        let actionBar = XCTAttachment(screenshot: app.screenshot()); actionBar.name = "Browse bulk selection action bar"
+        actionBar.lifetime = .keepAlways; add(actionBar)
+        app.buttons["browse.selection.favourite"].tap()
+        XCTAssertTrue(category(names[0]).waitForExistence(timeout: 10))
+        XCTAssertEqual(category(names[0]).value as? String, "部分选中")
+        XCTAssertEqual(category(names[1]).value as? String, "部分选中")
+        category(names[2]).tap()
+        let dialog = XCTAttachment(screenshot: app.screenshot()); dialog.name = "Mixed memberships and multi-category selection"
+        dialog.lifetime = .keepAlways; add(dialog)
+        save()
+        XCTAssertFalse(app.buttons["browse.selection.cancel"].exists)
+
+        work("测试动画").tap()
+        XCTAssertTrue(app.buttons["details.favourite"].waitForExistence(timeout: 20))
+        expectation(for: NSPredicate(format: "enabled == true"), evaluatedWith: app.buttons["details.favourite"])
+        waitForExpectations(timeout: 20)
+        app.buttons["details.favourite"].tap()
+        XCTAssertTrue(category(names[0]).waitForExistence(timeout: 10))
+        for name in names { XCTAssertEqual(category(name).value as? String, "已选中") }
+        category(names[1]).tap(); save()
+        app.buttons["details.favourite"].tap()
+        XCTAssertTrue(category(names[0]).waitForExistence(timeout: 10))
+        XCTAssertEqual(category(names[0]).value as? String, "已选中")
+        XCTAssertEqual(category(names[1]).value as? String, "未选中")
+        XCTAssertEqual(category(names[2]).value as? String, "已选中")
+        app.buttons["favourite.cancel"].tap()
+        XCTAssertTrue(app.buttons["favourite.cancel"].waitForNonExistence(timeout: 5))
+        app.navigationBars.buttons.firstMatch.tap()
+        openCategories("测试电影")
+        XCTAssertEqual(category(names[0]).value as? String, "未选中")
+        XCTAssertEqual(category(names[1]).value as? String, "未选中")
+        XCTAssertEqual(category(names[2]).value as? String, "已选中")
+        app.buttons["favourite.cancel"].tap()
+        XCTAssertTrue(app.buttons["favourite.cancel"].waitForNonExistence(timeout: 5))
+
+        // Swiping sideways across a library work switches category without opening that work.
+        app.mainTab("作品库").tap()
+        let all = app.buttons["category.all"]
+        XCTAssertTrue(all.waitForExistence(timeout: 10))
+        if !all.isSelected { all.tap() }
+        let favourite = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@",
+                                                         "favourite.", "测试动画")).firstMatch
+        XCTAssertTrue(favourite.waitForExistence(timeout: 10), app.debugDescription)
+        let before = XCTAttachment(screenshot: app.screenshot()); before.name = "Library before swipe"
+        before.lifetime = .keepAlways; add(before)
+        let start = favourite.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: -220, dy: 0)))
+        let after = XCTAttachment(screenshot: app.screenshot()); after.name = "Library after swipe"
+        after.lifetime = .keepAlways; add(after)
+        expectation(for: NSPredicate(format: "selected == false"), evaluatedWith: all)
+        waitForExpectations(timeout: 5)
+        XCTAssertFalse(app.buttons["details.favourite"].waitForExistence(timeout: 2),
+                       "A swipe over a work must not open it: \(app.debugDescription)")
+        XCTAssertTrue(all.isHittable)
+        // A plain tap still opens the work.
+        all.tap()
+        XCTAssertTrue(favourite.waitForExistence(timeout: 10))
+        favourite.tap()
+        XCTAssertTrue(app.buttons["details.favourite"].waitForExistence(timeout: 20))
+    }
+
     /// A repo hub "导入" link opens the app from outside, imports the repository and installs an APK whose manifest
     /// has no library marker (third-party repositories; Mihon reads the library from the version name).
     /// VomicMH is used because CopyManga is NSFW-flagged and hidden by default.
@@ -20,10 +161,55 @@ final class ProductFlowTests: XCTestCase {
             index: "https://raw.githubusercontent.com/keiyoushi/extensions/repo/index.pb", repositoryQuery: "Keiyoushi")
     }
 
+    /// Tsundoku (novel) extension from the NovelSourcery repository: installs, survives relaunch and lists works.
+    @MainActor
+    func testTsundokuRepositoryInstallsAndBrowses() throws {
+        // A Chinese source: only the system's languages are enabled by default, so an English one is not listed.
+        try installRepositoryExtension(packageName: "eu.kanade.tachiyomi.novelextension.zh.qimao",
+            // The app stores GitHub "raw" links under their raw.githubusercontent.com address.
+            index: "https://raw.githubusercontent.com/NovelSourcery/extensions/repo/index.pb", repositoryQuery: "NovelSourcery",
+            kind: "TSUNDOKU", sourceTitle: "Qimao")
+    }
+
+    /// Aniyomi (video) extension from the yuzono repository: installs, survives relaunch and lists works.
+    @MainActor
+    func testAniyomiRepositoryInstallsAndBrowses() throws {
+        try installRepositoryExtension(packageName: "eu.kanade.tachiyomi.animeextension.zh.xfani",
+            index: "https://raw.githubusercontent.com/yuzono/anime-repo/repo/index.min.json", repositoryQuery: "anime-repo",
+            kind: "ANIYOMI", sourceTitle: "稀饭动漫")
+    }
+
+    /// Opens an installed source from the browse list by its title and waits for its first works.
+    private func assertSourceLists(_ app: XCUIApplication, ecosystem: String, title: String) {
+        // A fresh launch starts on the source list itself rather than the extension management pushed over it.
+        // Host stack traces of failed calls go to <data>/source-failures.log.
+        app.terminate()
+        app.launchEnvironment["KOTOTORO_SOURCE_DIAGNOSTICS"] = "1"
+        app.launch()
+        app.tabBars.buttons["浏览"].tap()
+        XCTAssertTrue(app.buttons["source.MIHON_524579092615598717"].waitForExistence(timeout: 90))
+        let search = app.pageSearchField()
+        for _ in 0..<4 where !search.waitForExistence(timeout: 3) { app.collectionViews.firstMatch.swipeDown(velocity: .fast) }
+        XCTAssertTrue(search.exists, app.debugDescription)
+        search.tap(); search.typeText(title)
+        let source = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS[c] %@",
+                                                      "source.\(ecosystem)_", title)).firstMatch
+        XCTAssertTrue(source.waitForExistence(timeout: 30), "\(title) missing from browse: \(app.debugDescription)")
+        source.tap()
+        let first = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "source.content.")).firstMatch
+        let error = app.descendants(matching: .any)["sources.error"]
+        _ = XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in first.exists || error.exists },
+                                                             object: nil)], timeout: 180)
+        let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "\(title) listing"
+        shot.lifetime = .keepAlways; add(shot)
+        XCTAssertTrue(first.exists, "\(title) listing failed: \(error.exists ? error.label : app.debugDescription)")
+    }
+
     @MainActor
     private func installRepositoryExtension(packageName: String,
         index: String = "https://raw.githubusercontent.com/LittleSurvival/copymanga-copy20/repo/index.min.json",
-        repositoryQuery: String = "copymanga-copy20") throws {
+        repositoryQuery: String = "copymanga-copy20", kind: String = "MIHON", sourceTitle: String? = nil) throws {
         continueAfterFailure = false
         let app = XCUIApplication(); app.launch()
         app.tabBars.buttons["浏览"].tap()
@@ -31,7 +217,7 @@ final class ProductFlowTests: XCTestCase {
             throw XCTSkip("Requires the real API JVM profile (online)")
         }
         let encoded = index.addingPercentEncoding(withAllowedCharacters: .alphanumerics)!
-        app.open(URL(string: "kototoro://add-repo?url=\(encoded)&kind=MIHON")!)
+        app.open(URL(string: "kototoro://add-repo?url=\(encoded)&kind=\(kind)")!)
         let tabs = app.segmentedControls["repository.tabs"]
         XCTAssertTrue(tabs.waitForExistence(timeout: 30), "The link should open repositories: \(app.debugDescription)")
         let imported = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
@@ -44,7 +230,7 @@ final class ProductFlowTests: XCTestCase {
         let repositorySearch = app.pageSearchField()
         XCTAssertTrue(repositorySearch.waitForExistence(timeout: 10))
         repositorySearch.tap(); repositorySearch.typeText(repositoryQuery + "\n")
-        let repository = app.buttons["repository.row.MIHON.\(index)"]
+        let repository = app.buttons["repository.row.\(kind).\(index)"]
         XCTAssertTrue(repository.waitForExistence(timeout: 30), app.debugDescription)
         repository.tap()
         let extensionSearch = app.searchFields["搜索此仓库的扩展"]
@@ -66,16 +252,20 @@ final class ProductFlowTests: XCTestCase {
         let screenshot = XCTAttachment(screenshot: app.screenshot()); screenshot.lifetime = .keepAlways; add(screenshot)
         XCTAssertFalse(app.descendants(matching: .any)["repository.error"].exists, app.debugDescription)
         XCTAssertTrue(app.staticTexts["repository.status"].label.contains("已安装"))
-        XCTAssertTrue(app.buttons["extension.details.MIHON:\(packageName)"].exists, app.debugDescription)
+        XCTAssertTrue(app.buttons["extension.details.\(kind):\(packageName)"].exists, app.debugDescription)
         app.terminate(); app.launch()
         app.tabBars.buttons["浏览"].tap()
         XCTAssertTrue(app.buttons["source.MIHON_524579092615598717"].waitForExistence(timeout: 90))
         app.buttons["sources.repositories"].tap()
+        // Another test may have left the persisted ecosystem filter on a different runtime.
+        let ecosystemFilter = app.buttons["extension.ecosystem.clear"]
+        if ecosystemFilter.waitForExistence(timeout: 5) { ecosystemFilter.tap() }
         let search = app.pageSearchField()
         XCTAssertTrue(search.waitForExistence(timeout: 30))
         search.tap(); search.typeText(packageName + "\n")
-        XCTAssertTrue(app.buttons["extension.details.MIHON:\(packageName)"].waitForExistence(timeout: 30),
+        XCTAssertTrue(app.buttons["extension.details.\(kind):\(packageName)"].waitForExistence(timeout: 30),
                       "Installed extension should survive relaunch: \(app.debugDescription)")
+        if let sourceTitle { assertSourceLists(app, ecosystem: kind, title: sourceTitle) }
     }
 
     /// JAR parser repositories from the repo hub: legacy JSON indexes with a plugin.jar entry, and a GitHub
@@ -208,7 +398,14 @@ final class ProductFlowTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["details.title"].waitForExistence(timeout: 30))
         let favourite = app.buttons["details.favourite"]
         XCTAssertTrue(favourite.waitForExistence(timeout: 10))
-        if favourite.label == "收藏" { favourite.tap() }
+        if favourite.label == "收藏" {
+            favourite.tap()
+            let category = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "favourite.category.")).firstMatch
+            XCTAssertTrue(category.waitForExistence(timeout: 10))
+            category.tap()
+            app.buttons["favourite.save"].tap()
+            XCTAssertTrue(app.buttons["favourite.save"].waitForNonExistence(timeout: 10))
+        }
         let chapter = revealChapter(in: app, timeout: 30)
         XCTAssertTrue(chapter.exists); chapter.tap()
         let position = app.staticTexts["player.position"]
