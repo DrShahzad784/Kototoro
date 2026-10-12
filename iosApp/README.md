@@ -98,9 +98,13 @@ xcodebuild -project "iosApp/Kototoro.xcodeproj" -scheme Kototoro \
 
 ## 真机 IPA（本地侧载预览）
 
-发行用的默认构建（不含嵌入式 JVM）由本机打包后手动上传：
-`iosApp/Scripts/package-ipa.sh [版本] [构建号]`，版本默认取工程的 `MARKETING_VERSION`，构建号默认为提交数；
-产物为 `iosApp/build/release-ios/Kototoro-<版本>-ios-unsigned.ipa` 与 `.sha256`，需由侧载工具签名。
+发行 IPA 由本机打包后手动上传：
+`iosApp/Scripts/package-ipa.sh [--jvm [运行时目录]] [版本] [构建号]`，版本默认取工程的 `MARKETING_VERSION`，构建号默认为提交数；
+产物在 `iosApp/build/release-ios/`（`Kototoro-<版本>-ios[-jvm]-unsigned.ipa` 与 `.sha256`），需由侧载工具签名。
+不带 `--jvm` 的默认构建没有扩展运行时，只能使用 CMS/TVBox。`--jvm` 默认嵌入 `iosApp/build/jvm-device`，
+先用 `build-jvm-preview.py --platform iphoneos --profile "iosApp/build/jvm-real-api"` 生成；脚本拒绝模拟器运行时。
+发行包不带预览配置里的样本扩展与 `preview.json`：打包时另存 `iosApp/build/jvm-device-release`，`jars`/`plugins` 为空，
+扩展由用户从仓库或文件安装。
 
 应用图标位于 `Kototoro/Assets.xcassets/AppIcon.appiconset`，复用 Android 的 Kototoro 图标。
 真机必须使用 `iphoneos` JVM 切片；模拟器的 Arm64 静态库不能直接放进真机应用。
