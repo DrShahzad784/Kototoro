@@ -49,10 +49,11 @@ struct LibraryRecordsView: View {
                 }
                 .padding(.bottom, 24)
             }
+            .rootPageTopEdge()
             .background(Color(uiColor: .systemGroupedBackground))
             .navigationTitle(selection == 0 ? "历史" : "更新")
-            .navigationSubtitle(spacesEnabled ? ContentSpace.subtitle(space) : "")
-            // In-place search as a toolbar button; the search tab stays the app-wide search.
+            .spaceSubtitle(spacesEnabled ? ContentSpace.subtitle(space) : "")
+            // The system search field under the title; the search tab stays the app-wide search.
             .pageSearch(text: $query, prompt: selection == 0 ? "搜索历史" : "搜索更新")
             .toolbar {
                 ToolbarItemGroup(placement: .topBarTrailing) {

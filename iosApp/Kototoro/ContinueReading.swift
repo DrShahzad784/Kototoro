@@ -171,99 +171,19 @@ extension EnvironmentValues {
     }
 }
 
-/// In-place page search (library, browse, records). The system's minimized toolbar search cannot be closed inside
-/// this TabView (its close button only drops the keyboard and the field refocuses), so the page owns the whole
-/// interaction: a toolbar button opens a compact field at the top; submitting collapses it to a keyword capsule
-/// that reopens the field in one tap and clears the search in another; cancel closes and clears.
-private struct PageSearch: ViewModifier {
-    @Binding var text: String
-    let prompt: String
-    @State private var editing = false
-    @FocusState private var focused: Bool
-
-    private var keyword: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
-
-    func body(content: Content) -> some View {
-        content
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("搜索", systemImage: "magnifyingglass") { open() }
-                        .accessibilityIdentifier("pageSearch.open")
-                }
-            }
-            .safeAreaBar(edge: .top, spacing: 0) {
-                Group {
-                    if editing { field } else if !keyword.isEmpty { capsule }
-                }
-                .padding(.horizontal)
-                .padding(.bottom, 6)
-                .animation(.snappy, value: editing)
-            }
-            .onChange(of: focused) { _, isFocused in
-                // Leaving the field (scrolling, another control) keeps a typed keyword as the capsule.
-                if !isFocused && !keyword.isEmpty { editing = false }
-            }
-    }
-
-    private var field: some View {
-        HStack(spacing: 8) {
-            HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField(prompt, text: $text)
-                    .focused($focused)
-                    .submitLabel(.search)
-                    .autocorrectionDisabled()
-                    .textInputAutocapitalization(.never)
-                    .onSubmit { focused = false; editing = keyword.isEmpty ? editing : false }
-                    .accessibilityIdentifier("pageSearch.field")
-                if !text.isEmpty {
-                    Button("清除文本", systemImage: "xmark.circle.fill") { text = "" }
-                        .labelStyle(.iconOnly).foregroundStyle(.secondary).buttonStyle(.plain)
-                }
-            }
-            .padding(.horizontal, 12).padding(.vertical, 8)
-            .glassEffect(.regular.interactive(), in: .capsule)
-            Button("取消") { close() }
-                .accessibilityIdentifier("pageSearch.cancel")
-        }
-        .transition(.opacity.combined(with: .move(edge: .top)))
-    }
-
-    private var capsule: some View {
-        HStack(spacing: 6) {
-            Button { open() } label: {
-                Label(keyword, systemImage: "magnifyingglass").lineLimit(1)
-            }
-            .accessibilityLabel("正在搜索：\(keyword)")
-            .accessibilityHint("编辑搜索词")
-            .accessibilityIdentifier("pageSearch.keyword")
-            Button("清除搜索", systemImage: "xmark.circle.fill") { withAnimation(.snappy) { text = "" } }
-                .labelStyle(.iconOnly)
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("pageSearch.clear")
-        }
-        .font(.footnote.weight(.medium))
-        .buttonStyle(.plain)
-        .padding(.leading, 12).padding(.trailing, 8).padding(.vertical, 6)
-        .glassEffect(.regular.interactive(), in: .capsule)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .transition(.opacity.combined(with: .move(edge: .top)))
-    }
-
-    private func open() {
-        editing = true
-        Task { @MainActor in focused = true }
-    }
-
-    private func close() {
-        focused = false
-        editing = false
-        text = ""
-    }
-}
-
+/// In-place page search (library, browse, records): the system field under the title, as Mail and Notes place it
+/// (`navigationBarDrawer`), shown at the top and tucked away while the content scrolls. The search tab stays the
+/// app-wide search; the minimized toolbar search could not be closed inside this TabView, which this placement avoids.
 extension View {
     func pageSearch(text: Binding<String>, prompt: String) -> some View {
-        modifier(PageSearch(text: text, prompt: prompt))
+        searchable(text: text, placement: .navigationBarDrawer(displayMode: .automatic), prompt: prompt)
+    }
+
+    /// The root pages (library, browse, records) run their content right up to the top bars without the scroll
+    /// edge blur. That blur also covered a large title resting over a top `safeAreaBar` (FB21613303); without it the
+    /// library keeps its large title like the other root pages. Applied to the page's own scroll view only, so
+    /// pushed pages keep the system effect.
+    func rootPageTopEdge() -> some View {
+        scrollEdgeEffectHidden(true, for: .top)
     }
 }

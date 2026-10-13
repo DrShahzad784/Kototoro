@@ -57,37 +57,33 @@ struct LibraryView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                // The categories are the pinned header of the page's own scroll view: they stay at the top while the
-                // works scroll. A floating top bar would not do: the navigation bar takes a horizontal scroll view
-                // there for the page's own, blurring the large title and fading the chips out at rest.
-                LazyVStack(alignment: .leading, spacing: 14, pinnedViews: [.sectionHeaders]) {
-                    Section {
-                        if !spacesEnabled && ContentKindPicker.isShown(availableKinds) {
-                            ContentKindPicker(selection: $pageKind, available: availableKinds).padding(.horizontal)
-                        }
-                        if let error = library.error, !library.favourites.isEmpty {
-                            Label(error, systemImage: "exclamationmark.triangle").font(.footnote).foregroundStyle(.red)
-                                .padding(.horizontal)
-                        }
-                        content
-                            .id(selectedCategory)
-                            .transition(.asymmetric(insertion: .move(edge: swipeEdge), removal: .opacity))
-                    } header: {
-                        if library.schemaVersion != nil {
-                            categoryBar
-                                .padding(.vertical, 6)
-                                .background(Color(uiColor: .systemGroupedBackground).opacity(0.92))
-                        }
+                LazyVStack(alignment: .leading, spacing: 14) {
+                    if !spacesEnabled && ContentKindPicker.isShown(availableKinds) {
+                        ContentKindPicker(selection: $pageKind, available: availableKinds).padding(.horizontal)
                     }
+                    if let error = library.error, !library.favourites.isEmpty {
+                        Label(error, systemImage: "exclamationmark.triangle").font(.footnote).foregroundStyle(.red)
+                            .padding(.horizontal)
+                    }
+                    content
+                        .id(selectedCategory)
+                        .transition(.asymmetric(insertion: .move(edge: swipeEdge), removal: .opacity))
                 }
+                .padding(.top, 8)
                 .padding(.bottom, 24)
             }
+            // The categories are the system bar under the navigation bar (Apple's `safeAreaBar` pattern): they stay
+            // at the top while the works scroll.
+            .safeAreaBar(edge: .top) {
+                if library.schemaVersion != nil { categoryBar.padding(.vertical, 6) }
+            }
+            .rootPageTopEdge()
             // Swiping sideways over the works moves to the previous / next category, like the chips do.
             .gesture(HorizontalSwipeGesture(onEnded: swipe))
             .background(Color(uiColor: .systemGroupedBackground))
             .navigationTitle("作品库")
-            .navigationSubtitle(spacesEnabled ? ContentSpace.subtitle(space) : "")
-            // In-place search as a toolbar button; the search tab stays the app-wide search.
+            .spaceSubtitle(spacesEnabled ? ContentSpace.subtitle(space) : "")
+            // The system search field under the title; the search tab stays the app-wide search.
             .pageSearch(text: $query, prompt: "搜索作品库")
             .refreshable { await library.refresh() }
             .task { await library.refresh() }

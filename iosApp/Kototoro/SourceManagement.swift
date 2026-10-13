@@ -93,6 +93,19 @@ enum ContentSpace {
     static func subtitle(_ kind: String) -> String { kind.isEmpty ? "" : "\(title(kind))空间" }
 }
 
+/// A root page's space subtitle. An empty one is not set at all: an empty navigation subtitle is still a subtitle to
+/// the bar, which lays the large title out for it, so pages without a space would keep a subtitle line.
+private struct SpaceSubtitle: ViewModifier {
+    let text: String
+    func body(content: Content) -> some View {
+        if text.isEmpty { content } else { content.navigationSubtitle(text) }
+    }
+}
+
+extension View {
+    func spaceSubtitle(_ text: String) -> some View { modifier(SpaceSubtitle(text: text)) }
+}
+
 /// The shared space panel, presented from each root page's trailing toolbar.
 struct SpaceMenu: View {
     @AppStorage(ContentSpace.key) private var kind = ""

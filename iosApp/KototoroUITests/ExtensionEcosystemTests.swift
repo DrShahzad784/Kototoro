@@ -255,36 +255,28 @@ final class ExtensionEcosystemTests: XCTestCase {
         attach("\(source) novel read offline")
     }
 
-    /// The root pages' in-place search: cancel closes it for good, a submitted keyword stays as a compact capsule
-    /// that names it, and the capsule clears it in one tap.
+    /// The root pages search in place with the system field under the title (not the search tab's global field):
+    /// a submitted keyword stays in the field, and cancel clears it and closes the keyboard for good.
     @MainActor
     func testRootPageSearchClosesAndShowsKeyword() throws {
-        for tab in ["作品库", "记录", "浏览"] {
+        for (tab, prompt) in [("作品库", "搜索作品库"), ("记录", "搜索历史"), ("浏览", "搜索源")] {
             app.mainTab(tab).tap()
-            let open = app.buttons["pageSearch.open"]
-            XCTAssertTrue(open.waitForExistence(timeout: 10), "\(tab): \(app.debugDescription)")
-            open.tap()
-            let field = app.textFields["pageSearch.field"]
-            XCTAssertTrue(field.waitForExistence(timeout: 5), app.debugDescription)
+            let field = app.pageSearchField()
+            XCTAssertTrue(field.exists && field.isHittable, "\(tab): \(app.debugDescription)")
+            XCTAssertEqual(field.placeholderValue, prompt, "\(tab): the page's own search, not the global one")
+            field.tap()
             XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), "\(tab): the field should take focus")
-            field.typeText("zz")
-            app.buttons["pageSearch.cancel"].tap()
-            // Closed, and still closed a moment later (the system field used to refocus right away).
-            XCTAssertTrue(field.waitForNonExistence(timeout: 3), "\(tab): cancel should close the field")
-            sleep(1)
-            XCTAssertFalse(field.exists || app.keyboards.firstMatch.exists, "\(tab): the field reopened")
-            XCTAssertFalse(app.buttons["pageSearch.keyword"].exists, "\(tab): cancel clears the keyword")
-
-            open.tap()
-            XCTAssertTrue(field.waitForExistence(timeout: 5))
             field.typeText("zz\n")
-            let keyword = app.buttons["pageSearch.keyword"]
-            XCTAssertTrue(keyword.waitForExistence(timeout: 5), "\(tab): submit should leave a keyword capsule")
-            XCTAssertEqual(keyword.label, "正在搜索：zz")
-            XCTAssertFalse(field.exists)
-            attach("\(tab) search keyword capsule")
-            app.buttons["pageSearch.clear"].tap()
-            XCTAssertTrue(keyword.waitForNonExistence(timeout: 3), "\(tab): the capsule clears the search")
+            XCTAssertEqual(field.value as? String, "zz", "\(tab): a submitted keyword stays in the field")
+            attach("\(tab) search keyword")
+            let cancel = app.navigationBars.buttons["取消"].firstMatch
+            XCTAssertTrue(cancel.waitForExistence(timeout: 5), "\(tab): \(app.debugDescription)")
+            cancel.tap()
+            // Closed, and still closed a moment later (the minimized toolbar field used to refocus right away).
+            XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 3), "\(tab): cancel should close search")
+            sleep(1)
+            XCTAssertFalse(app.keyboards.firstMatch.exists, "\(tab): the field reopened")
+            XCTAssertNotEqual(app.pageSearchField().value as? String, "zz", "\(tab): cancel clears the keyword")
         }
     }
 

@@ -349,20 +349,21 @@ struct SourcesView: View {
             Group {
                 if layout == .grid { grid } else { list }
             }
+            .rootPageTopEdge()
             .overlay {
                 if model.isLoading && model.sources.isEmpty { ProgressView("正在读取源…") }
             }
             .navigationTitle("浏览")
-            .navigationSubtitle(spacesEnabled ? ContentSpace.subtitle(space) : "")
+            .spaceSubtitle(spacesEnabled ? ContentSpace.subtitle(space) : "")
             .navigationDestination(for: SourceRoute.self) { route in
                 if let runtime = model.runtime {
                     SourceBrowseView(runtime: runtime, source: route.source)
                 }
             }
-            // In-place search as a toolbar button; the search tab stays the app-wide search.
+            // The system search field under the title; the search tab stays the app-wide search.
             .pageSearch(text: $query, prompt: "搜索源")
             .toolbar {
-                // Leading on this root page, so the trailing group keeps room for the page's own search button.
+                // Leading on this root page, so the trailing group keeps room for the space and display menus.
                 ToolbarItemGroup(placement: .topBarLeading) {
                     NavigationLink { RepositoriesView() } label: {
                         Label("仓库与扩展", systemImage: "shippingbox")
