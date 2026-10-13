@@ -17,6 +17,20 @@ struct ReaderImageArtifact: Equatable, Sendable {
         let rect = CGRect(x: Int(tile.decodeLeft), y: Int(tile.decodeTop),
                           width: Int(tile.decodeWidth), height: Int(tile.decodeHeight))
         let sample = max(1, Int(tile.sampleSize))
+        if let base = try await ReaderTileBaseCache.shared.base(for: self, sample: sample) {
+            try Task.checkCancellation()
+            // The base is this page decoded at 1/sample, so the tile is a crop of it (no copy, no decode).
+            let scale = CGFloat(base.width) / CGFloat(max(1, encodedWidth))
+            let region = CGRect(x: rect.minX * scale, y: rect.minY * scale,
+                                width: rect.width * scale, height: rect.height * scale)
+                .integral.intersection(CGRect(x: 0, y: 0, width: base.width, height: base.height))
+            guard !region.isEmpty, let cropped = base.cropping(to: region) else {
+                throw NSError(domain: "org.skepsun.kototoro.image", code: 1,
+                              userInfo: [NSLocalizedDescriptionKey: "页面区域越界"])
+            }
+            return UIImage(cgImage: cropped)
+        }
+        // A base too large for the cache: decode just this tile.
         let image = try await Task.detached(priority: .userInitiated) {
             try SourceImageFile.decodeRegion(directory: dir, relativePath: path, sha256: hash,
                                              byteSize: length, rect: rect, sampleSize: sample)
@@ -29,13 +43,14 @@ struct ReaderImageArtifact: Equatable, Sendable {
                      byteSize: Int64, cropMargins: Bool = false) async throws -> ReaderLoadedPage {
         try Task.checkCancellation()
         let loaded = try await Task.detached(priority: .userInitiated) { () throws -> ReaderLoadedPage in
-            let dims = try SourceImageFile.dimensions(directory: directory, relativePath: relativePath,
-                                                      sha256: sha256, byteSize: byteSize)
+            // One read and hash for both the size and the decode.
+            let data = try SourceImageFile.validatedData(directory: directory, relativePath: relativePath,
+                                                         sha256: sha256, byteSize: byteSize)
+            let dims = try SourceImageFile.dimensions(data: data)
             let reader = IosReader()
             let resolved = reader.decodeSize(width: Int32(dims.width), height: Int32(dims.height))
             let maxPixelSize = Int(max(resolved.width, resolved.height))
-            var image = try SourceImageFile.decode(directory: directory, relativePath: relativePath,
-                                                   sha256: sha256, byteSize: byteSize, maxPixelSize: maxPixelSize)
+            var image = try SourceImageFile.decode(data: data, maxPixelSize: maxPixelSize)
             let tiled = reader.isTiled(width: Int32(dims.width), height: Int32(dims.height))
             if cropMargins && !tiled, let cgImage = image.cgImage, cgImage.width >= 100, cgImage.height >= 100 {
                 let sample = Int(reader.edgeSampleSize(width: Int32(cgImage.width), height: Int32(cgImage.height)))
@@ -76,6 +91,82 @@ struct ReaderImageArtifact: Equatable, Sendable {
         }.value
         try Task.checkCancellation()
         return loaded
+    }
+}
+
+/// Tiled pages decoded once per sample size, the tiles on screen cropped from them: decoding each tile on its own
+/// read and hashed the whole file and decoded the whole page again, for every tile and every scroll step. Bases are
+/// bounded by bytes (least recently used go first) and dropped on memory warnings.
+actor ReaderTileBaseCache {
+    static let shared: ReaderTileBaseCache = {
+        let cache = ReaderTileBaseCache()
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: nil
+        ) { _ in Task { await cache.clear() } }
+        return cache
+    }()
+
+    /// Bytes of decoded bases kept; a single base above it is not cached and its tiles decode directly.
+    static let budget = 192 * 1024 * 1024
+
+    private struct Key: Hashable { let sha256: String; let sample: Int }
+
+    private var entries: [Key: CGImage] = [:]
+    private var order: [Key] = []
+    private var bytes = 0
+    private var pending: [Key: Task<CGImage, Error>] = [:]
+
+    /// The page decoded at 1/[sample] with its orientation applied, or nil when it would exceed the budget. A decode
+    /// already under way is shared, and it finishes for the cache even if this caller is cancelled.
+    func base(for artifact: ReaderImageArtifact, sample: Int) async throws -> CGImage? {
+        let key = Key(sha256: artifact.sha256, sample: sample)
+        if let image = entries[key] {
+            order.removeAll { $0 == key }; order.append(key)
+            return image
+        }
+        let width = (artifact.encodedWidth + sample - 1) / sample
+        let height = (artifact.encodedHeight + sample - 1) / sample
+        guard width * height * 4 <= Self.budget else { return nil }
+        let task: Task<CGImage, Error>
+        if let running = pending[key] {
+            task = running
+        } else {
+            let directory = artifact.directory, path = artifact.relativePath
+            let hash = artifact.sha256, length = artifact.byteSize
+            let maxPixelSize = max(width, height)
+            task = Task.detached(priority: .userInitiated) {
+                let image = try SourceImageFile.decode(directory: directory, relativePath: path, sha256: hash,
+                                                       byteSize: length, maxPixelSize: maxPixelSize)
+                guard let cgImage = image.cgImage else {
+                    throw NSError(domain: "org.skepsun.kototoro.image", code: 1,
+                                  userInfo: [NSLocalizedDescriptionKey: "无法解码此图片格式"])
+                }
+                return cgImage
+            }
+            pending[key] = task
+        }
+        let image: CGImage
+        do {
+            image = try await task.value
+        } catch {
+            if pending[key] == task { pending[key] = nil }
+            throw error
+        }
+        if pending[key] == task { pending[key] = nil }
+        if entries[key] == nil {
+            entries[key] = image
+            order.append(key)
+            bytes += image.bytesPerRow * image.height
+            while bytes > Self.budget, order.count > 1, let oldest = order.first {
+                order.removeFirst()
+                if let evicted = entries.removeValue(forKey: oldest) { bytes -= evicted.bytesPerRow * evicted.height }
+            }
+        }
+        return entries[key] ?? image
+    }
+
+    func clear() {
+        entries = [:]; order = []; bytes = 0
     }
 }
 

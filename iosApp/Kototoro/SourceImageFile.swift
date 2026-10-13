@@ -7,7 +7,12 @@ import UIKit
 enum SourceImageFile {
     static func decode(directory: URL, relativePath: String, sha256: String, byteSize: Int64,
                        maxPixelSize: Int = 4096) throws -> UIImage {
-        let data = try validatedData(directory: directory, relativePath: relativePath, sha256: sha256, byteSize: byteSize)
+        try decode(data: validatedData(directory: directory, relativePath: relativePath, sha256: sha256,
+                                       byteSize: byteSize), maxPixelSize: maxPixelSize)
+    }
+
+    /// Decodes bytes already returned by [validatedData].
+    static func decode(data: Data, maxPixelSize: Int = 4096) throws -> UIImage {
         let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
         guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions),
               let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
@@ -21,7 +26,12 @@ enum SourceImageFile {
 
     static func dimensions(directory: URL, relativePath: String, sha256: String,
                            byteSize: Int64) throws -> (width: Int, height: Int) {
-        let data = try validatedData(directory: directory, relativePath: relativePath, sha256: sha256, byteSize: byteSize)
+        try dimensions(data: validatedData(directory: directory, relativePath: relativePath, sha256: sha256,
+                                           byteSize: byteSize))
+    }
+
+    /// Reads the size of bytes already returned by [validatedData].
+    static func dimensions(data: Data) throws -> (width: Int, height: Int) {
         let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
         guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions) else {
             throw failure("无法解码此图片格式")
@@ -105,7 +115,7 @@ enum SourceImageFile {
         return UIImage(cgImage: cropped, scale: image.scale, orientation: image.imageOrientation)
     }
 
-    private static func validatedData(directory: URL, relativePath: String, sha256: String, byteSize: Int64) throws -> Data {
+    static func validatedData(directory: URL, relativePath: String, sha256: String, byteSize: Int64) throws -> Data {
         guard sha256.count == 64, sha256.allSatisfy({ "0123456789abcdef".contains($0) }),
               relativePath == "\(sha256).img", byteSize > 0, byteSize <= 64 * 1024 * 1024 else {
             throw failure("图片记录无效")

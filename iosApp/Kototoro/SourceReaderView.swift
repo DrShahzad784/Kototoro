@@ -36,6 +36,23 @@ final class SourceReaderModel: ObservableObject {
     private var fetches: [Int: PageFetch] = [:]
     /// Android's reader threads: pages downloading at the same time, the page on screen before prefetches.
     private let pageGate = RequestGate(limit: ReaderLoading.threads)
+    /// Pages next to the screen being loaded and decoded before the lazy stack shows them (see [neighborPages]).
+    private var neighborLoads: [Int: Task<Void, Never>] = [:]
+    /// The next chapter's page list and first downloads, started near this chapter's end (see [preloadNextChapter]).
+    private var nextPreload: ChapterPreload?
+    /// The page list of a preloaded chapter being opened, used by [load] instead of asking the source again.
+    private var preloadedPages: Task<[IosSourcePage], Error>?
+
+    private final class ChapterPreload {
+        let chapterId: String
+        let pages: Task<[IosSourcePage], Error>
+        var fetches: [Int: PageFetch] = [:]
+        init(chapterId: String, pages: Task<[IosSourcePage], Error>) { self.chapterId = chapterId; self.pages = pages }
+        func cancel() {
+            pages.cancel()
+            for fetch in fetches.values where !fetch.finished { fetch.task.cancel() }
+        }
+    }
 
     private final class PageFetch {
         let task: Task<IosSourceImage, Error>
@@ -43,6 +60,7 @@ final class SourceReaderModel: ObservableObject {
         let isPrefetch: Bool
         var consumers = 0
         var finished = false
+        var failed = false
         init(task: Task<IosSourceImage, Error>, ticket: Int, isPrefetch: Bool) {
             self.task = task; self.ticket = ticket; self.isPrefetch = isPrefetch
         }
@@ -52,10 +70,13 @@ final class SourceReaderModel: ObservableObject {
     private var offset: Float = 0
     private var savedPosition: IosReadingPosition?
     private(set) var restoreOrigin: CGFloat = 0
+    /// The continuous scroll origin of the position being read now.
+    var currentOrigin: CGFloat { CGFloat(engine.scrollOrigin(index: Int32(index), offset: offset)) }
     private var awaitingRestore = false
-    /// A freshly created paged scroll view starts at its first slot and reports it before it is moved to the
-    /// reading slot; those reports must not overwrite the position (switching page-turn styles recreates it).
-    private(set) var pendingSlot: Int?
+    /// The paged scroll view is moving under the reader's finger (dragged or settling from a drag). Like Android's
+    /// pager reports (target page while scrolling, settled page after) and Aidoku's finished page-turn gestures, only
+    /// these moves report a page: its own first layout and moves the model made (taps, the slider, restores) do not.
+    var isUserPaging = false
 
     var selectedPage: IosSourcePage? { pages.indices.contains(index) ? pages[index] : nil }
     var image: UIImage? { images[index] }
@@ -84,6 +105,7 @@ final class SourceReaderModel: ObservableObject {
             slotIndex = Int(slots.first { $0.placements.contains { Int($0.index) == index } }?.index ?? 0)
         }
         if cropChanged {
+            cancelNeighborLoads()
             images = [:]; artifacts = [:]; loading = []; pageRevision += 1
         }
     }
@@ -97,7 +119,11 @@ final class SourceReaderModel: ObservableObject {
         isLoadingPages = true; error = nil; challenge = nil
         defer { if request == token { isLoadingPages = false } }
         do {
-            let result = try await ReaderDownloads.pages(runtime: runtime, content: content, chapter: selected)
+            let preloaded = preloadedPages
+            preloadedPages = nil
+            // A preload that failed is asked again, so its error is the source's current one.
+            let early = try? await preloaded?.value
+            let result = try await early ?? ReaderDownloads.pages(runtime: runtime, content: content, chapter: selected)
             let saved = try await library?.position(content: content)
             try Task.checkCancellation()
             guard request == token else { return }
@@ -121,7 +147,7 @@ final class SourceReaderModel: ObservableObject {
 
     func loadImage(at target: Int) async {
         guard loaded, pages.indices.contains(target), images[target] == nil, !loading.contains(target) else {
-            if target == index { prefetch() }
+            if target == index { prefetch(); if images[target] != nil { loadNeighbors() } }
             return
         }
         let token = request
@@ -152,12 +178,13 @@ final class SourceReaderModel: ObservableObject {
                 slotIndex = Int(slots.first { $0.placements.contains { Int($0.index) == index } }?.index ?? 0)
             }
             // Decoded images stay bounded. Immutable on-disk artifacts survive eviction.
-            let keep = Set((max(0, index - 2)...min(max(0, pages.count - 1), index + 3)))
+            let keep = Set((max(0, index - 2)...min(max(0, pages.count - 1), index + 3))).union(neighborPages())
             images = images.filter { keep.contains($0.key) }
             artifacts = artifacts.filter { keep.contains($0.key) }
             if slots.first(where: { $0.placements.contains { Int($0.index) == index } })?
                 .placements.contains(where: { Int($0.index) == target }) == true {
                 prefetch()
+                loadNeighbors()
                 await persist()
             }
         } catch { if !Task.isCancelled && request == token { fail(error) } }
@@ -166,7 +193,7 @@ final class SourceReaderModel: ObservableObject {
     /// The page's downloaded artifact. A prefetch already under way is joined and moved ahead of other prefetches;
     /// a download only the screen wanted is cancelled once no page view waits for it, as Android releases it.
     private func pageArtifact(at target: Int) async throws -> IosSourceImage {
-        let fetch = fetches[target] ?? startFetch(at: target, isPrefetch: false)
+        let fetch = fetches[target].flatMap { $0.failed ? nil : $0 } ?? startFetch(at: target, isPrefetch: false)
         fetch.consumers += 1
         await pageGate.promote(fetch.ticket, to: ReaderLoading.visiblePriority)
         var released = false
@@ -189,27 +216,59 @@ final class SourceReaderModel: ObservableObject {
 
     @discardableResult
     private func startFetch(at target: Int, isPrefetch: Bool) -> PageFetch {
-        let runtime = runtime, page = pages[target], gate = pageGate
+        let fetch = makeFetch(page: pages[target], isPrefetch: isPrefetch)
+        fetches[target] = fetch
+        return fetch
+    }
+
+    /// A download of [page], not yet tied to a page of the open chapter (a preloaded next chapter's page).
+    private func makeFetch(page: IosSourcePage, isPrefetch: Bool) -> PageFetch {
+        let runtime = runtime, gate = pageGate
         let ticket = RequestGate.makeTicket()
         let priority = isPrefetch ? ReaderLoading.prefetchPriority : ReaderLoading.visiblePriority
         let task = Task { try await gated(gate, priority: priority, ticket: ticket) { try await runtime.image(page: page) } }
         let fetch = PageFetch(task: task, ticket: ticket, isPrefetch: isPrefetch)
-        fetches[target] = fetch
-        let token = request
         Task { [weak self] in
             let succeeded = (try? await task.value) != nil
-            guard let self, self.request == token, self.fetches[target] === fetch else { return }
-            if succeeded { fetch.finished = true } else { self.fetches[target] = nil }
+            if succeeded { fetch.finished = true; return }
+            fetch.failed = true
+            guard let self, let target = self.fetches.first(where: { $0.value === fetch })?.key else { return }
+            self.fetches[target] = nil
         }
         return fetch
+    }
+
+    /// Android loads the next chapter once the reader is within `BOUNDS_PAGE_OFFSET` (paged) or
+    /// `WEBTOON_CHAPTER_PRELOAD_OFFSET` (continuous) pages of the end, and Aidoku also prefetches its first pages; the
+    /// chapter then opens from that page list and those downloads instead of starting from nothing.
+    private func preloadNextChapter(upper: Int) {
+        guard let next = nextChapter, nextPreload?.chapterId != next.id else { return }
+        let offset = preferences.mode >= 3 ? 10 : 2
+        guard upper >= pages.count - 1 - offset else { return }
+        nextPreload?.cancel()
+        let runtime = runtime, content = content
+        let preload = ChapterPreload(chapterId: next.id, pages: Task {
+            try await ReaderDownloads.pages(runtime: runtime, content: content, chapter: next)
+        })
+        nextPreload = preload
+        Task { [weak self] in
+            guard let pages = try? await preload.pages.value, let self, self.nextPreload === preload,
+                  ReaderLoading.isPrefetchApplicable,
+                  !ReaderDownloads.isDownloaded(content: self.content, chapter: next) else { return }
+            for target in 0..<min(pages.count, ReaderLoading.prefetchLimit) {
+                preload.fetches[target] = self.makeFetch(page: pages[target], isPrefetch: true)
+            }
+        }
     }
 
     /// Android's reader offers the ten pages after the visible ones and keeps the nearest `prefetch limit` of them
     /// queued; pages that dropped out of that window are no longer wanted. Downloaded chapters need nothing.
     private func prefetch() {
-        guard loaded, !ReaderDownloads.isDownloaded(content: content, chapter: chapter) else { return }
+        guard loaded else { return }
         let upper = slots.first { $0.placements.contains { Int($0.index) == index } }?
             .placements.map { Int($0.index) }.max() ?? index
+        preloadNextChapter(upper: upper)
+        guard !ReaderDownloads.isDownloaded(content: content, chapter: chapter) else { return }
         let window = Set((upper + 1)..<min(pages.count, upper + 1 + ReaderLoading.prefetchWindow))
         for (target, fetch) in fetches where fetch.isPrefetch && !fetch.finished && fetch.consumers == 0 && !window.contains(target) {
             fetch.task.cancel()
@@ -220,7 +279,72 @@ final class SourceReaderModel: ObservableObject {
         for target in wanted { startFetch(at: target, isPrefetch: true) }
     }
 
+    /// Android's pager composes one slot on each side of the screen (`beyondViewportPageCount = 1`) and the webtoon
+    /// strip keeps two screens ahead (`WEBTOON_AHEAD_CACHE_FRACTION`); those pages load at visible priority and are
+    /// decoded before they scroll in, where a lazy stack would only start them once the page view appears.
+    private func neighborPages() -> Set<Int> {
+        guard let current = slots.firstIndex(where: { $0.placements.contains { Int($0.index) == index } }) else {
+            return []
+        }
+        var result = Set<Int>()
+        func add(_ position: Int) {
+            guard slots.indices.contains(position) else { return }
+            for placement in slots[position].placements { result.insert(Int(placement.index)) }
+        }
+        // The slot on screen too: a page view that found its page already loading waits for this load.
+        add(current - 1); add(current)
+        if preferences.mode >= 3 {
+            let extent = preferences.mode == 3 ? viewport.height : viewport.width
+            var covered: CGFloat = 0
+            var position = current
+            // The screen itself plus two more.
+            while slots.indices.contains(position), covered < extent * 3 {
+                add(position)
+                if let placement = slots[position].placements.first {
+                    covered += max(1, CGFloat(preferences.mode == 3 ? placement.height : placement.width))
+                } else {
+                    covered += 1
+                }
+                position += 1
+            }
+        } else {
+            // Android composes one slot ahead; Aidoku keeps two pages ahead decoded (`Reader.pagesToPreload`).
+            add(current + 1); add(current + 2)
+        }
+        return result
+    }
+
+    private func loadNeighbors() {
+        guard loaded else { return }
+        let wanted = neighborPages()
+        for (target, task) in neighborLoads where !wanted.contains(target) {
+            task.cancel()
+            neighborLoads[target] = nil
+        }
+        let token = request
+        for target in wanted.sorted() where neighborLoads[target] == nil && images[target] == nil
+            && !loading.contains(target) {
+            neighborLoads[target] = Task { [weak self] in
+                await self?.loadImage(at: target)
+                guard !Task.isCancelled, let self, self.request == token else { return }
+                self.neighborLoads[target] = nil
+            }
+        }
+    }
+
+    /// Leaving the reader: nothing ahead of the screen is wanted any more.
+    func stopPreloading() {
+        cancelNeighborLoads()
+        nextPreload?.cancel(); nextPreload = nil
+    }
+
+    private func cancelNeighborLoads() {
+        for task in neighborLoads.values { task.cancel() }
+        neighborLoads = [:]
+    }
+
     private func cancelFetches() {
+        cancelNeighborLoads()
         for fetch in fetches.values where !fetch.finished { fetch.task.cancel() }
         fetches = [:]
     }
@@ -230,19 +354,9 @@ final class SourceReaderModel: ObservableObject {
         return segment == 1 || segment == 2 ? SourceImageFile.splitPage(base, segment: segment) : base
     }
 
-    /// The paged scroll view is (re)created at its first slot; returns the slot it has to be moved to.
-    func beginSlotRestore() -> Int? {
-        guard loaded, !slots.isEmpty else { return nil }
-        pendingSlot = slotIndex
-        return slotIndex
-    }
-
-    /// A slot the paged scroll view reports; ignored until it has reached the slot being restored.
+    /// A slot the paged scroll view settled on under the reader's finger.
     func scrolledToSlot(_ selected: Int) {
-        if let pendingSlot {
-            guard selected == pendingSlot else { return }
-            self.pendingSlot = nil
-        }
+        guard isUserPaging else { return }
         slotIndex = selected
         selectSlot(selected)
     }
@@ -274,18 +388,17 @@ final class SourceReaderModel: ObservableObject {
         slots = engine.slots()
     }
 
-    func userScrolled() { awaitingRestore = false; pendingSlot = nil; autoScroll = false }
+    func userScrolled() { awaitingRestore = false; autoScroll = false }
 
     func jump(to page: Int) {
         guard pages.indices.contains(page) else { return }
-        index = page; offset = 0; pendingSlot = nil
+        index = page; offset = 0
         slotIndex = Int(slots.first { $0.placements.contains { Int($0.index) == page } }?.index ?? 0)
     }
 
     func movePage(forward: Bool) {
         let next = slotIndex + (forward ? 1 : -1)
         guard slots.indices.contains(next) else { return }
-        pendingSlot = nil
         slotIndex = next; selectSlot(next)
     }
 
@@ -293,8 +406,13 @@ final class SourceReaderModel: ObservableObject {
         guard !isLoadingPages else { return }
         startAtEnd = atEnd
         await persist()
-        request = UUID(); chapter = target; loaded = false; pendingSlot = nil
+        request = UUID(); chapter = target; loaded = false
+        // Moving on to the preloaded chapter keeps its page list and downloads; anything else drops them.
+        let adopted = !atEnd && nextPreload?.chapterId == target.id ? nextPreload : nil
+        if adopted == nil { nextPreload?.cancel() }
+        nextPreload = nil
         cancelFetches()
+        if let adopted { fetches = adopted.fetches.filter { !$0.value.failed }; preloadedPages = adopted.pages }
         pages = []; slots = []; images = [:]; artifacts = [:]; loading = []; index = 0; slotIndex = 0; offset = 0; engine.reset()
         await load()
     }
@@ -413,10 +531,12 @@ struct SourceReaderView: View {
         .toolbar(.hidden, for: .navigationBar, .tabBar)
         .statusBarHidden(!controls)
         .task {
+            // A reader shown again keeps its model: it continues where it is rather than where this model began.
+            let shownAgain = model.loaded
             model.library = library.library; await model.load()
             if settings.value.mode >= 3 {
                 await Task.yield()
-                scrollContinuous(to: model.restoreOrigin)
+                scrollContinuous(to: shownAgain ? model.currentOrigin : model.restoreOrigin)
             }
         }
         .task(id: model.index) { await model.loadImage(at: model.index); await model.persist() }
@@ -443,7 +563,11 @@ struct SourceReaderView: View {
                 else { model.autoScroll = false }
             }
         }
-        .onDisappear { model.autoScroll = false; Task { await model.persist(); await library.refresh() } }
+        .onDisappear {
+            model.autoScroll = false
+            model.stopPreloading()
+            Task { await model.persist(); await library.refresh(); await ReaderTileBaseCache.shared.clear() }
+        }
         .readerPresence()
         .sheet(isPresented: $showingDownloads) { ReaderDownloadsSheet() }
         .fileExporter(isPresented: $exporting, document: export, contentType: .png,
@@ -489,6 +613,14 @@ struct SourceReaderView: View {
 
     @ViewBuilder
     private func scrollingSurface(size: CGSize) -> some View {
+        // Android creates its pager with the reading page as `initialPage` once the pages are known (Aidoku sets its
+        // page view controller to the reading page). A paged scroll view built before that would start on the first
+        // slot and have to be moved there afterwards, which a lazy stack that has not laid out yet drops.
+        if settings.value.mode >= 3 || model.loaded { scrollView(size: size) }
+    }
+
+    @ViewBuilder
+    private func scrollView(size: CGSize) -> some View {
         let vertical = settings.value.mode == 2 || settings.value.mode == 3
         let continuous = settings.value.mode >= 3
         let strip = settings.value.mode == 3
@@ -517,6 +649,13 @@ struct SourceReaderView: View {
         }
         .onScrollPhaseChange { _, phase in
             if phase == .interacting { model.userScrolled() }
+            switch phase {
+            case .tracking, .interacting, .decelerating: model.isUserPaging = true
+            case .idle, .animating:
+                // The settling report can arrive in the same update as the phase change.
+                Task { @MainActor in await Task.yield(); model.isUserPaging = false }
+            @unknown default: break
+            }
             if phase == .idle && !model.autoScroll { Task { await model.persist() } }
         }
         .onChange(of: continuousPage) { _, page in
@@ -528,20 +667,17 @@ struct SourceReaderView: View {
         })
         .onChange(of: model.loaded) { _, loaded in
             if continuous && loaded { scrollContinuous(to: model.restoreOrigin) }
-            if !continuous && loaded { restoreSlot(proxy) }
         }
-        // Recreated when the page-turn style or reading mode changes; keep the page being read.
-        .onAppear { if !continuous { restoreSlot(proxy) } }
+        // Created at the reading slot through the position binding; as Android's pager applies its initial page once
+        // the pages are laid out, it is also moved there once after the first layout, in case the binding was not
+        // applied. Recreated when the reading mode or page-turn style changes, it keeps the page being read.
+        .onAppear {
+            guard !continuous else { return }
+            Task { @MainActor in
+                await Task.yield()
+                if !model.isUserPaging { proxy.scrollTo(model.slotIndex, anchor: .topLeading) }
+            }
         }
-    }
-
-    private func restoreSlot(_ proxy: ScrollViewProxy) {
-        guard let slot = model.beginSlotRestore() else { return }
-        Task { @MainActor in
-            // After the slots are laid out, or the lazy stack has nothing to scroll to yet.
-            await Task.yield()
-            guard model.pendingSlot == slot else { return }
-            proxy.scrollTo(slot, anchor: .topLeading)
         }
     }
 

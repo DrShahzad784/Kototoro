@@ -184,11 +184,15 @@ struct SourceDetailsView: View {
         }
         .onChange(of: reading == nil) { _, closed in if closed { Task { await refreshRecords() } } }
         .navigationDestination(item: $reading) { request in
-            if model.isNovel { NovelReaderView(runtime: model.runtime, content: request.content, chapter: request.chapter) }
-            else { SourceReaderView(runtime: model.runtime, content: request.content, chapter: request.chapter) }
+            Group {
+                if model.isNovel { NovelReaderView(runtime: model.runtime, content: request.content, chapter: request.chapter) }
+                else { SourceReaderView(runtime: model.runtime, content: request.content, chapter: request.chapter) }
+            }
+            .id(request.id)
         }
         .fullScreenCover(item: $playing, onDismiss: { Task { await refreshRecords() } }) { request in
             VideoPlayerView(runtime: model.runtime, content: request.content, chapter: request.chapter)
+                .id(request.id)
         }
     }
 
@@ -548,10 +552,12 @@ struct SourceDetailsView: View {
     }
 }
 
+/// One opening of a reader or player. Each opening is its own identity: reopening the chapter just closed must build
+/// a new reader, which reads the saved position again, rather than get back the previous reader's state.
 struct PlaybackRequest: Identifiable, Hashable {
     let content: IosSourceContent
     let chapter: IosSourceChapter
-    var id: String { chapter.id }
-    static func == (lhs: Self, rhs: Self) -> Bool { lhs.content.id == rhs.content.id && lhs.chapter.id == rhs.chapter.id }
-    func hash(into hasher: inout Hasher) { hasher.combine(content.id); hasher.combine(chapter.id) }
+    let id = UUID()
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.id == rhs.id }
+    func hash(into hasher: inout Hasher) { hasher.combine(id) }
 }
